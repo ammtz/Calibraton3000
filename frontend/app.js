@@ -1,4 +1,4 @@
-/* Calibraton3000. You gut-check JobScout's placement; it learns where it is wrong. */
+/* Calibraton3000. You gut-check a ranker's placement; it learns where that ranker is wrong. */
 (() => {
   "use strict";
 
@@ -54,16 +54,19 @@
     card.hidden = false;
     card.className = "card";
 
+    // The source names itself in the payload, or stays anonymous. Either works.
+    const who = job.source || "the ranker";
+
     if (job.scored) {
       el("rank").textContent =
         job.rank && job.rank_total ? `#${job.rank} of ${job.rank_total}` : "ranked";
       el("rank").className = "rank";
-      el("prompt").textContent = "Did JobScout put this in the right place?";
+      el("prompt").textContent = `Did ${who} put this in the right place?`;
     } else {
       // No rank to check, so the rating reads as an absolute call. Trained apart.
-      el("rank").textContent = "UNSCORED";
+      el("rank").textContent = "UNRANKED";
       el("rank").className = "rank unscored";
-      el("prompt").textContent = "JobScout couldn't score this one. Call it yourself.";
+      el("prompt").textContent = `${who} couldn't rank this one. Call it yourself.`;
     }
 
     el("known").textContent =

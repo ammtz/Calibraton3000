@@ -1,42 +1,24 @@
-"""JobScout's points map, handled the way JobScout handles it.
+"""Criteria handling. The service has no opinion about what the dimensions mean.
 
-The one rule that matters: **unknown is absent, never zero.** A dimension
-nobody could establish is left out, not counted as worst-possible. Every
-function here preserves that — nothing fills a gap with a default.
+Dimensions are discovered from whatever arrives. Calibraton never holds a list
+of expected names — a ranker that renames a dimension, adds one, or drops one
+needs no change here.
+
+The one rule that is enforced: **unknown is absent, never zero.** A dimension
+nobody established is left out, not defaulted. Nothing here fills a gap.
 """
 from __future__ import annotations
 
-from typing import Any
-
-# The 13 dimensions, split the way JobScout splits them. Fit asks what the job
-# is worth to you; P(hire) asks whether you will get it.
-FIT_DIMENSIONS = (
-    "pay",
-    "security",
-    "trajectory",
-    "location",
-    "industry",
-    "company_size",
-    "public_signals",
-)
-
-P_HIRE_DIMENSIONS = (
-    "pillar_overlap",
-    "tn_sponsorship",
-    "seniority_match",
-    "domain_overlap",
-    "posting_freshness",
-    "pool_thinness",
-)
-
-ALL_DIMENSIONS = FIT_DIMENSIONS + P_HIRE_DIMENSIONS
+from typing import Any, Iterable
 
 
 def known_points(points: Any) -> dict[str, float]:
-    """The dimensions JobScout actually established, as floats.
+    """The dimensions actually established, as floats.
 
     Absent keys stay absent. Nulls are absence spelled out loud, so they are
-    dropped too rather than read as a value.
+    dropped too rather than read as a value. Booleans are refused: a flag is
+    not a measurement, and reading `false` as 0.0 is the defaulting this
+    service exists to avoid.
     """
     out: dict[str, float] = {}
     if not isinstance(points, dict):
@@ -55,11 +37,19 @@ def known_points(points: Any) -> dict[str, float]:
     return out
 
 
-def half(points: dict[str, float], dimensions: tuple[str, ...]) -> dict[str, float]:
-    """Just the dimensions belonging to one half of the score."""
-    return {k: v for k, v in points.items() if k in dimensions}
+def dimensions_seen(point_maps: Iterable[dict[str, float]]) -> list[str]:
+    """Every dimension name observed across a set of cards, sorted."""
+    names: set[str] = set()
+    for points in point_maps:
+        names.update(points)
+    return sorted(names)
 
 
-def coverage(points: dict[str, float]) -> tuple[int, int]:
-    """(known, total) across the 13 named dimensions — JobScout's `7/13 known`."""
-    return sum(1 for d in ALL_DIMENSIONS if d in points), len(ALL_DIMENSIONS)
+def coverage(points: dict[str, float], declared_total: int | None = None) -> tuple[int, int | None]:
+    """(known, total). The total is the source's to declare.
+
+    A standalone service cannot know how many dimensions a ranker *could* have
+    established, so an undeclared total stays None rather than being guessed
+    from the keys that happen to be present.
+    """
+    return len(points), declared_total

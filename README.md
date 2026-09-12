@@ -1,23 +1,25 @@
 # Calibraton3000
 
-**JobScout ranks the jobs. You gut-check the ranking. Calibraton tells JobScout
-where its weighting is wrong.**
+**A ranker puts things in an order. You gut-check the order. Calibraton tells
+the ranker which dimensions it is weighting wrong.**
 
-One Flask app, one SQLite file. No scraper, no LLM, no network calls — and no
-score of its own. JobScout already scores; two rankers is one too many.
+One Flask app, one SQLite file, no build step. No scraper, no LLM, no network
+calls — and no score of its own. Something else already ranks; two rankers is
+one too many.
 
-## What it actually does
+## What it does
 
-1. Imports JobScout's ranked cards (`worker.py export` → `POST /api/jobs`).
-2. Shows you one card at a time with **JobScout's** rank, score and coverage.
-3. You rate 1–5: *did JobScout put this in the right place?*
-4. On session end it computes a **per-dimension correction** — "you under-value
-   `trajectory` by 0.28 rating points per standard deviation" — and writes it to
-   `config/correction.json`.
-5. JobScout's matrix reads that file and weights it however it likes.
+1. **Ingest** a batch of ranked items — anything with an id, a rank, and a map
+   of dimension → number.
+2. **Swipe** one card at a time, showing *the source's* rank, score and
+   coverage. Rate 1–5: did it belong there?
+3. **Correct.** On session end it computes a per-dimension correction —
+   *"you under-value `trajectory` by 0.28 rating points per standard
+   deviation"* — and writes `config/correction.json`.
+4. The source reads that file and weights it however it likes.
 
-Nothing is ever written back into the MATRIX. See
-[docs/jobscout-contract.md](docs/jobscout-contract.md) for the exact boundary.
+Nothing is ever written back to the source. The whole boundary is two files:
+[docs/ingest-contract.md](docs/ingest-contract.md).
 
 ## Run it
 
@@ -34,13 +36,14 @@ SQLite lands at `./data/calibraton.db`.
 run.py                     entry point
 app/config.py              paths, DECISION_FLOOR, MIN_SUPPORT, DAMPING
 app/models.py              jobs, decisions — the whole data model
-app/criteria.py            the 13 dimensions; unknown stays unknown
+app/criteria.py            dimension handling; unknown stays unknown
 app/calibration.py         the correction rule, drift log, trends
 app/api/routes.py          the endpoints
-frontend/                  vanilla JS, no build step
+frontend/                  vanilla JS, no framework
 config/correction.json     the deliverable, git-tracked
 logs/correction_*.json     drift history, one file per day
-docs/                      the contract and the rule
+docs/ingest-contract.md    what a source must send, and what it gets back
+docs/adapters/             worked examples
 ```
 
 ## Endpoints
@@ -48,34 +51,34 @@ docs/                      the contract and the rule
 | Method | Path | Does |
 |---|---|---|
 | GET | `/` | Serve the swipe UI |
-| POST | `/api/jobs` | Import a JobScout export (idempotent on `card_id`) |
-| GET | `/api/next` | Next unswiped card |
+| POST | `/api/jobs` | Ingest a batch (idempotent on the source's item id) |
+| GET | `/api/next` | Next unswiped item |
 | POST | `/api/decision` | Record one 1–5 rating |
 | POST | `/api/recalibrate` | Recompute the correction, write the log |
-| GET | `/api/correction` | **The agent-facing read.** Current correction vector |
+| GET | `/api/correction` | **The deliverable.** Current correction vector |
 | GET | `/api/trends` | Drift history as JSON |
 
-`/api/correction` is one past the six in the spec. It exists because the whole
-point is that JobScout's agents can read this — serving it out of a file on disk
-only works if they share a filesystem.
+## Design rules
 
-## The 13 dimensions
+**It knows nothing about your domain.** Dimension names are discovered from the
+payload. Rename one, add one, drop one — no code change here. There is no list
+of expected dimensions anywhere in `app/`.
 
-| Fit | P(hire) |
-|---|---|
-| pay, security, trajectory, location, industry, company_size, public_signals | pillar_overlap, tn_sponsorship, seniority_match, domain_overlap, posting_freshness, pool_thinness |
+**Unknown is absent, never zero** — end to end. A dimension the source could not
+establish is dropped from the item, from the math, and from the output rather
+than corrected to zero on no evidence. `null` is treated as absence; booleans
+are refused, because reading `false` as `0.0` is the same lie.
 
-**Unknown is absent, never zero** — end to end. A dimension JobScout could not
-establish is dropped from the card, dropped from the math, and dropped from the
-output rather than corrected to zero on no evidence.
+**It never ranks.** The card shows the source's numbers. Calibraton computes one
+thing and it is not a score.
 
 ## The deck
 
-| Card kind | Reaches the deck? | Why |
+| Item | Reaches the deck? | Why |
 |---|---|---|
-| Scored and ranked | Yes | The rating is a gut check on its placement |
-| Unscored (a half unknown) | Yes, tagged | No rank to check, so the rating is an absolute call — stored and summarized apart, never folded into the correction |
-| Excluded (ITAR, sub-floor, junior) | No | JobScout took it off the ranking; there is no placement to check |
+| Ranked | Yes | The rating is a gut check on its placement |
+| Unranked | Yes, tagged | No placement to check, so the rating is an absolute call — stored and summarized apart, never folded into the correction |
+| Excluded by the source | No | Off the ranking already; there is no placement to check |
 
 ## Ratings
 
@@ -89,7 +92,7 @@ decision; indifference is not a vote.
 
 Covariance of your rank-residual with each dimension, damped 50% against the
 previous run. Refuses to move under **50 decisions** — a guardrail, not a
-derived number. Full rationale and the open parameters:
+derived number. Rationale and open parameters:
 [docs/correction-rule.md](docs/correction-rule.md).
 
 ## Smoke test
@@ -98,7 +101,7 @@ derived number. Full rationale and the open parameters:
 .venv/bin/python -m pytest -q
 ```
 
-Imports cards, drains the deck, asserts snapshots carry the rank they were
+Ingests items, drains the deck, asserts snapshots carry the rank they were
 judged against, asserts recalibrate refuses under the floor, seeds 60+
 decisions, asserts a log is written — and asserts the correction **finds a
 deliberately planted bias** while leaving thin and constant dimensions absent.
@@ -106,5 +109,4 @@ Then restarts the app and asserts no state was lost.
 
 ## Out of scope
 
-Auth, deploy, Docker, multi-user, resume parsing, and anything at all that
-writes back to JobScout.
+Auth, deploy, Docker, multi-user, and anything that writes back to a source.

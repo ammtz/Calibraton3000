@@ -1,6 +1,6 @@
 """The smoke test from the build spec §10, re-cut for the calibration design.
 
-Run this before pointing Calibraton3000 at a real JobScout export.
+Run this before pointing Calibraton3000 at a real batch.
 """
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 
 from app import config, create_app
 from app.calibration import expected_rating, load_correction
-from app.criteria import ALL_DIMENSIONS
 from tests.conftest import (
     PLANTED_BIAS, counts, excluded_cards, rate_from_rank, scored_cards, unscored_cards,
 )
@@ -35,7 +34,7 @@ def swipe_everything(client, session_id="smoke", rater=None):
 
 
 def rate_card(job):
-    """Rate a card served by /api/next. Unscored cards get an absolute call."""
+    """Rate an item served by /api/next. Unranked ones get an absolute call."""
     if not job["scored"]:
         return 4
     return rate_from_rank({
@@ -46,12 +45,12 @@ def rate_card(job):
 
 
 def test_smoke(client, sandbox):
-    # 1. Import 5 cards, assert 5 rows. Excluded cards are refused.
+    # 1. Ingest 5 items, assert 5 rows. Excluded items are refused.
     res = client.post("/api/jobs", json={"cards": scored_cards(5) + excluded_cards(3)})
     assert res.status_code == 201
     body = res.get_json()
     assert body["imported"] == 5
-    assert body["excluded"] == 3, "hard-filtered cards must not enter the deck"
+    assert body["excluded"] == 3, "hard-filtered items must not enter the deck"
     assert counts()["jobs"] == 5
 
     # 2. Swipe all 5, assert 5 decisions.
@@ -106,11 +105,11 @@ def test_smoke(client, sandbox):
     new = load_correction(sandbox["correction"])
     assert new != old, "recalibration must actually move the correction"
     assert new[PLANTED_BIAS] > 0.2, (
-        f"the rater valued {PLANTED_BIAS} more than JobScout's rank did; "
+        f"the rater valued {PLANTED_BIAS} more than the source's rank did; "
         f"the correction should say so, got {new.get(PLANTED_BIAS)}"
     )
 
-    # Unscored cards are counted apart and never folded into the correction.
+    # Unranked items are counted apart and never folded into the correction.
     assert result["unscored"]["n"] == 6
     assert result["skipped_unscored"] == 6
     assert result["trained_on"] == 61 - 6 - result["skipped_neutral"]
@@ -143,7 +142,7 @@ def test_meh_counts_toward_floor_but_trains_nothing(client, sandbox):
 
 
 def test_unknown_dimensions_stay_absent(client):
-    """A dimension JobScout could not establish is never read as zero."""
+    """A dimension the source could not establish is never read as zero."""
     card = scored_cards(1)[0]
     card["points"].pop("pay")
     card["points"]["security"] = None  # absence spelled out loud
@@ -155,7 +154,7 @@ def test_unknown_dimensions_stay_absent(client):
     assert job["criteria"]["trajectory"] == 0.9
 
 
-def test_unscored_cards_reach_the_deck_tagged(client):
+def test_unranked_items_reach_the_deck_tagged(client):
     client.post("/api/jobs", json={"cards": unscored_cards(2)})
     job = client.get("/api/next").get_json()["job"]
     assert job["scored"] is False
@@ -171,7 +170,7 @@ def test_unscored_cards_reach_the_deck_tagged(client):
 
 
 def test_expected_rating_maps_rank_to_the_scale():
-    assert expected_rating(1, 50) == 5.0        # best card predicts "Great"
+    assert expected_rating(1, 50) == 5.0        # best item predicts "Great"
     assert expected_rating(50, 50) == 1.0       # worst predicts "No way"
     assert expected_rating(None, None) is None  # no rank, nothing to predict
 
@@ -200,4 +199,46 @@ def test_correction_endpoint_is_readable_before_any_data(client):
     body = client.get("/api/correction").get_json()
     assert body["correction"] == {}
     assert body["calibrated"] is False
-    assert body["dimensions"] == list(ALL_DIMENSIONS)
+    assert body["dimensions"] == [], "no data means no dimensions, not a guessed list"
+
+
+def test_any_domain_works(client, sandbox):
+    """The service holds no list of expected dimensions, so any domain fits.
+
+    Same planted-bias setup as the smoke test, in a domain that shares not one
+    dimension name with it. If a name were hardcoded anywhere in app/, this
+    would return an empty correction.
+    """
+    items = []
+    for i in range(60):
+        base = 1.0 - i / 59
+        tannin = 0.9 if i % 2 == 0 else 0.1     # independent of the source's rank
+        items.append({
+            "card_id": f"wine_{i:04d}",
+            "title": f"Vintage {1990 + i}",
+            "company": "Some Vineyard",
+            "scored": True,
+            "score": round(base, 4),
+            "rank": i + 1,
+            "rank_total": 60,
+            "points": {"acidity": round(base, 3), "tannin": tannin,
+                       "oak": round(base * 0.5, 3), "price": round(1 - base, 3)},
+            "known_total": 4,
+        })
+    assert client.post("/api/jobs", json={"source": "Sommelier", "cards": items}).status_code == 201
+
+    while True:
+        job = client.get("/api/next").get_json()["job"]
+        if job is None:
+            break
+        assert job["source"] == "Sommelier", "the source names itself; the service just shows it"
+        percentile = 1.0 - (job["rank"] - 1) / (job["rank_total"] - 1)
+        rating = max(1, min(5, round(1 + 4 * percentile + 1.5 * (job["criteria"]["tannin"] - 0.5))))
+        client.post("/api/decision", json={
+            "job_id": job["id"], "rating": rating, "session_id": "wine"})
+
+    result = client.post("/api/recalibrate").get_json()
+    assert result["status"] == "recalibrated"
+    assert result["new"]["tannin"] > 0.2, (
+        f"the planted bias must surface in any domain, got {result['new'].get('tannin')}")
+    assert set(result["new"]) <= {"acidity", "tannin", "oak", "price"}

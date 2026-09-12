@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 
 from app import config
 from app.calibration import load_correction, read_trends, recalibrate
-from app.criteria import ALL_DIMENSIONS, coverage, known_points
+from app.criteria import coverage, known_points
 from app.db import get_db
 from app.models import Decision, Job, RATINGS
 
@@ -21,16 +21,17 @@ def _bad(msg: str, code: int = 400):
 
 @bp.post("/jobs")
 def import_jobs():
-    """Import a `worker.py export` payload. Idempotent on card id.
+    """Ingest a batch from any ranker. Idempotent on the source's item id.
 
-    Excluded cards are refused on purpose: JobScout took them off the ranking,
-    so there is no placement to gut-check. Unscored cards are kept — they land
-    in the deck tagged, and train separately.
+    Items the source marked excluded are refused: it took them off the ranking,
+    so there is no placement to gut-check. Unranked items are kept — they land
+    in the deck tagged, and train as their own dataset.
     """
     payload = request.get_json(silent=True)
     if payload is None:
         return _bad("Request body must be JSON")
     cards = payload.get("cards") if isinstance(payload, dict) else payload
+    source_name = payload.get("source") if isinstance(payload, dict) else None
     if not isinstance(cards, list):
         return _bad('Expected {"cards": [...]} or a JSON array of cards', 422)
 
@@ -62,21 +63,22 @@ def import_jobs():
                 continue
 
             points = known_points(points_raw)
-            known, known_total = coverage(points)
+            known, known_total = coverage(points, card.get("known_total"))
             scored = bool(card.get("scored", card.get("score") is not None))
 
             db.add(Job(
                 source_id=source_id,
+                source=card.get("source") or source_name,
                 title=card.get("title"),
                 company=card.get("company"),
                 blurb=card.get("blurb"),
                 criteria=points,
                 scored=scored,
-                jobscout_score=card.get("score"),
-                jobscout_rank=card.get("rank"),
+                source_score=card.get("score"),
+                source_rank=card.get("rank"),
                 rank_total=card.get("rank_total"),
                 known=card.get("known", known),
-                known_total=card.get("known_total", known_total),
+                known_total=known_total,
                 card=card,
                 imported_at=datetime.now(timezone.utc),
             ))
@@ -95,12 +97,12 @@ def import_jobs():
 
 @bp.get("/next")
 def next_job():
-    """Next unswiped card. Shows JobScout's numbers; Calibraton computes none."""
+    """Next unswiped item. Shows the source's numbers; Calibraton computes none."""
     with get_db() as db:
         decided = select(Decision.job_id)
         job = db.scalar(
             select(Job).where(Job.id.not_in(decided))
-            .order_by(Job.scored.desc(), Job.jobscout_rank, Job.imported_at, Job.id)
+            .order_by(Job.scored.desc(), Job.source_rank, Job.imported_at, Job.id)
             .limit(1)
         )
         remaining = db.scalar(select(func.count(Job.id)).where(Job.id.not_in(decided))) or 0
@@ -138,13 +140,13 @@ def record_decision():
         if job is None:
             return _bad("Job not found", 404)
 
-        # Frozen at swipe time. Carries JobScout's placement too, because the
+        # Frozen at swipe time. Carries the source's placement too, because the
         # residual is meaningless without the rank it was measured against.
         snapshot = {
             "points": job.criteria or {},
             "scored": job.scored,
-            "score": job.jobscout_score,
-            "rank": job.jobscout_rank,
+            "score": job.source_score,
+            "rank": job.source_rank,
             "rank_total": job.rank_total,
             "known": job.known,
             "known_total": job.known_total,
@@ -192,9 +194,9 @@ def do_recalibrate():
 
 @bp.get("/correction")
 def correction():
-    """What JobScout's agents read.
+    """The deliverable. Whatever consumes Calibraton reads this.
 
-    Positive means JobScout under-weights that dimension; negative means it
+    Positive means the source under-weights that dimension; negative means it
     over-weights it. A dimension with too little evidence is absent, not zero.
     """
     current = load_correction()
@@ -202,7 +204,7 @@ def correction():
         n = db.scalar(select(func.count(Decision.id))) or 0
     return jsonify({
         "correction": current,
-        "dimensions": list(ALL_DIMENSIONS),
+        "dimensions": sorted(current),
         "decisions": n,
         "floor": config.DECISION_FLOOR,
         "calibrated": bool(current),

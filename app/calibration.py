@@ -1,8 +1,8 @@
-"""The calibration loop: measure where your gut disagrees with JobScout's rank,
-attribute the disagreement to dimensions, emit a correction.
+"""The calibration loop: measure where your judgment disagrees with the source's
+ranking, attribute the disagreement to dimensions, emit a correction.
 
-Calibraton never produces a competing score. It produces a statement about
-JobScout's weighting — "you under-value trajectory" — which JobScout's matrix
+Calibraton never produces a competing score. It produces one statement about
+somebody else's scorer — "you under-value dimension X" — which that scorer
 consumes at whatever weight it likes.
 
 Runs on session end, never mid-session. Refuses to move under DECISION_FLOOR.
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app import config
-from app.criteria import ALL_DIMENSIONS
+from app.criteria import dimensions_seen
 from app.models import NEUTRAL_RATING
 
 RULE = "rank-residual-covariance-v1"
@@ -49,7 +49,7 @@ def save_correction(correction: dict[str, float], path: Path | None = None) -> N
 # --------------------------------------------------------------------------
 
 def expected_rating(rank: int | None, rank_total: int | None) -> float | None:
-    """The rating JobScout's placement predicts, on the same 1-5 scale.
+    """The rating the source's placement predicts, on the same 1-5 scale.
 
     Rank 1 of N predicts 5 ("Great"); rank N predicts 1 ("No way"). Anything
     without a rank has nothing to predict, so it returns None rather than a
@@ -71,11 +71,14 @@ def _residual(snapshot: dict[str, Any], rating: int) -> float | None:
 def propose_correction(old: dict[str, float], decisions: Iterable[Any]) -> dict[str, Any]:
     """Covariance of rank-residual with each dimension, damped against `old`.
 
-    A positive correction on a dimension means cards that score high on it get
-    better gut checks than their rank predicted: JobScout is under-weighting it.
-    Negative means the opposite. Zero-ish means JobScout has that one right,
-    and the vector is free to shrink to nothing as it gets calibrated — which
-    is why nothing here normalizes to a fixed magnitude.
+    A positive correction on a dimension means items that score high on it get
+    better gut checks than their rank predicted: the source is under-weighting
+    it. Negative means the opposite. Zero-ish means the source has that one
+    right, and the vector is free to shrink to nothing as it gets calibrated —
+    which is why nothing here normalizes to a fixed magnitude.
+
+    Dimensions are whatever the decisions contain. Nothing is expected, so
+    nothing is missing.
     """
     rows: list[tuple[float, dict[str, float]]] = []
     skipped_neutral = 0
@@ -100,7 +103,7 @@ def propose_correction(old: dict[str, float], decisions: Iterable[Any]) -> dict[
     raw: dict[str, float] = {}
     support: dict[str, int] = {}
 
-    for dim in ALL_DIMENSIONS:
+    for dim in dimensions_seen(points for _, points in rows):
         observed = [(r, p[dim]) for r, p in rows if dim in p]
         support[dim] = len(observed)
         if len(observed) < config.MIN_SUPPORT:
@@ -134,10 +137,10 @@ def propose_correction(old: dict[str, float], decisions: Iterable[Any]) -> dict[
 
 
 def summarize_unscored(decisions: Iterable[Any]) -> dict[str, Any]:
-    """Unscored cards, kept as their own dataset.
+    """Unranked items, kept as their own dataset.
 
-    These have no rank to gut-check, so a rating on one is an absolute call,
-    not a residual. Reported alongside the correction and never folded into it.
+    These have no placement to gut-check, so a rating on one is an absolute
+    call, not a residual. Reported beside the correction, never folded into it.
     """
     ratings = [d.rating for d in decisions if not d.was_scored]
     if not ratings:

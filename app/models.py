@@ -1,4 +1,4 @@
-"""Two tables. Calibraton stores JobScout's cards verbatim and adds one key."""
+"""Two tables. Calibraton stores the source's items verbatim and adds one key."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -27,30 +27,32 @@ def _now() -> datetime:
 
 
 class Job(Base):
-    """One JobScout card. `card` is the export payload, untouched."""
+    """One ranked item. `card` is the ingested payload, untouched."""
 
     __tablename__ = "jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    # JobScout's card id, e.g. "job_0042". Unique so re-exports are idempotent.
+    # The source's own id for this item. Unique, so re-ingesting is idempotent.
     source_id: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
+    # Who ranked it, for display only. The service works without it.
+    source: Mapped[Optional[str]] = mapped_column(String(100))
 
     title: Mapped[Optional[str]] = mapped_column(String(500))
     company: Mapped[Optional[str]] = mapped_column(String(500))
     blurb: Mapped[Optional[str]] = mapped_column(Text)
 
-    # JobScout's points map: string -> number. Absent means unknown, never zero.
+    # The source's points map: string -> number. Absent means unknown, never zero.
     criteria: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
-    # JobScout's own verdict, stored, never recomputed. Null when it declined to score.
+    # The source's own verdict, stored, never recomputed. Null when it declined to rank.
     scored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    jobscout_score: Mapped[Optional[float]] = mapped_column(Float)
-    jobscout_rank: Mapped[Optional[int]] = mapped_column(Integer)
+    source_score: Mapped[Optional[float]] = mapped_column(Float)
+    source_rank: Mapped[Optional[int]] = mapped_column(Integer)
     rank_total: Mapped[Optional[int]] = mapped_column(Integer)
     known: Mapped[Optional[int]] = mapped_column(Integer)
     known_total: Mapped[Optional[int]] = mapped_column(Integer)
 
-    # The export payload exactly as it arrived, so the extra key is all we ever add.
+    # The payload exactly as it arrived, so the extra key is all we ever add.
     card: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     imported_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
@@ -58,17 +60,18 @@ class Job(Base):
     decisions: Mapped[list["Decision"]] = relationship(back_populates="job")
 
     def as_card(self) -> dict[str, Any]:
-        """What the swipe UI renders. JobScout's numbers, not ours."""
+        """What the swipe UI renders. The source's numbers, never ours."""
         return {
             "id": self.id,
             "source_id": self.source_id,
+            "source": self.source,
             "title": self.title,
             "company": self.company,
             "blurb": self.blurb,
             "criteria": self.criteria or {},
             "scored": self.scored,
-            "score": self.jobscout_score,
-            "rank": self.jobscout_rank,
+            "score": self.source_score,
+            "rank": self.source_rank,
             "rank_total": self.rank_total,
             "known": self.known,
             "known_total": self.known_total,
@@ -81,15 +84,15 @@ class Decision(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), nullable=False, index=True)
 
-    # 1..5. On a scored card this is a gut check on JobScout's rank; on an
-    # unscored one there is no rank to check, so it reads as an absolute call.
+    # 1..5. On a ranked item this is a gut check on that placement; on an
+    # unranked one there is nothing to check, so it reads as an absolute call.
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # Deliberately two separate signals: desire and expectation.
     would_apply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     would_get: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    # Did JobScout have a rank for this card? Splits the two training sets.
+    # Did the source have a rank for this item? Splits the two training sets.
     was_scored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     # Frozen at swipe time so later corrections never rewrite history.

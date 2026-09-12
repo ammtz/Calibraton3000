@@ -1,4 +1,8 @@
-"""Every test runs against a throwaway SQLite file, correction file and log dir."""
+"""Every test runs against a throwaway SQLite file, correction file and log dir.
+
+The dimension names below are arbitrary. Calibraton never sees a list of
+expected names, so `test_any_domain_works` uses a completely different set.
+"""
 from __future__ import annotations
 
 import pytest
@@ -8,8 +12,8 @@ from app.calibration import save_correction
 from app.db import get_db
 from app.models import Decision, Job
 
-# JobScout ranks these cards without regard to `trajectory`; the fake rater
-# cares about it a lot. A working correction must discover that gap.
+# The fake source ranks without regard to `trajectory`; the fake rater cares
+# about it a lot. A working correction must discover that gap.
 PLANTED_BIAS = "trajectory"
 
 
@@ -39,9 +43,9 @@ def client(sandbox):
 
 
 def scored_cards(count, *, offset=0, thin_dimension_after=5):
-    """Deterministic ranked cards. `trajectory` varies independently of rank.
+    """Deterministic ranked items. `trajectory` varies independently of rank.
 
-    `pool_thinness` is present on only the first few cards, so MIN_SUPPORT has
+    `pool_thinness` is present on only the first few items, so MIN_SUPPORT has
     something to drop.
     """
     cards = []
@@ -85,12 +89,12 @@ def scored_cards(count, *, offset=0, thin_dimension_after=5):
 
 
 def unscored_cards(count, *, offset=900):
-    """Cards JobScout declined to score — one whole half unknown."""
+    """Items the source declined to rank — too much was unknown."""
     return [{
         "card_id": f"job_{offset + i:04d}",
         "title": f"Mystery Role {offset + i}",
         "company": f"Opaque Co {offset + i}",
-        "blurb": "Why this fits: unclear, nobody could establish P(hire).",
+        "blurb": "Why this fits: unclear, too many dimensions unestablished.",
         "scored": False,
         "score": None,
         "rank": None,
@@ -103,20 +107,20 @@ def unscored_cards(count, *, offset=900):
 
 
 def excluded_cards(count, *, offset=800):
-    """Hard-filtered by JobScout: ITAR, sub-floor band, junior title."""
+    """Hard-filtered by the source before it ever ranked them."""
     return [{
         "card_id": f"job_{offset + i:04d}",
         "title": f"Junior Analyst {offset + i}",
         "company": "Restricted Corp",
         "excluded": True,
-        "exclusion_reason": "title outside USMCA professional categories",
+        "exclusion_reason": "filtered by the source",
         "scored": False,
         "points": {},
     } for i in range(count)]
 
 
 def rate_from_rank(card):
-    """A rater who agrees with JobScout except that trajectory matters to them."""
+    """A rater who agrees with the source except that trajectory matters more."""
     total = card["rank_total"] or 2
     percentile = 1.0 - (card["rank"] - 1) / max(total - 1, 1)
     expected = 1.0 + 4.0 * percentile
