@@ -1,105 +1,107 @@
-# JobFilteringApp
+# Calibraton3000
 
-A job capture and ranking tool. Capture job postings from LinkedIn (via Chrome extension), store them in a local database, and rank them against your resume using an LLM.
+Swipe job postings. Store every decision with the criteria that produced it.
+Recompute scoring weights from those decisions. Log the drift.
 
-**Stack:** Flask · SQLAlchemy · Alembic · PostgreSQL · OpenAI-compatible LLM
+One Flask app, one SQLite file. No scraper, no LLM, no network calls —
+JobScout already scores; two rankers is one too many.
 
----
-
-## Quick Start
-
-### 1. Start Postgres
+## Run it
 
 ```bash
-docker-compose up -d
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python run.py       # http://127.0.0.1:5000
 ```
 
-### 2. Install backend dependencies
+That starts everything. SQLite lands at `./data/calibraton.db`.
+
+## Layout
+
+```
+run.py                  entry point
+app/config.py           paths, DECISION_FLOOR
+app/models.py           jobs, decisions — the whole data model
+app/scoring.py          criteria -> features -> weighted sum
+app/calibration.py      learning loop, drift log, trends
+app/api/routes.py       the six endpoints
+frontend/               vanilla JS swipe UI, no build step
+config/weights.json     flat float weights, git-tracked
+logs/weights_*.json     weight history, one file per day
+docs/                   weight update rule proposal
+```
+
+## Endpoints
+
+| Method | Path | Does |
+|---|---|---|
+| GET | `/` | Serve swipe UI |
+| POST | `/api/jobs` | Bulk import JobScout JSON (idempotent on `source_id`) |
+| GET | `/api/next` | Next unswiped job, scored with current weights |
+| POST | `/api/decision` | Record one swipe |
+| POST | `/api/recalibrate` | Recompute weights, write log |
+| GET | `/api/trends` | Weight history as JSON |
+
+### Importing from JobScout
+
+`POST /api/jobs` takes a JSON array, or `{"jobs": [...]}`:
+
+```json
+[
+  {
+    "source_id": "js-0001",
+    "title": "Staff Engineer",
+    "company": "Acme",
+    "blurb": "Why this fits: small team, you own the toolchain.",
+    "criteria": { "seniority_fit": 0.9, "remote": true, "comp": { "base": 190000 } }
+  }
+]
+```
+
+`criteria` is JobScout's raw fields, stored untouched. Re-importing the same
+`source_id` is a no-op.
+
+## Scoring
+
+Plain weighted sum. `criteria` is flattened to numeric features — bools to
+1/0, nested objects to dotted keys (`comp.base`), numeric lists to their mean,
+non-numeric values dropped — then `score = Σ weight[k] × feature[k]`.
+
+Criteria with no matching weight contribute nothing, so a weight key that does
+not exist in your JobScout output is inert rather than silently wrong.
+
+> **`config/weights.json` currently holds placeholder keys.** Replace them with
+> JobScout's actual criterion names on first real import. Until then every card
+> scores 0.
+
+## Learning loop
+
+Runs on session end (the UI's *End session & recalibrate* button), never
+mid-session. Refuses to move anything under **50 decisions** — a guardrail, not
+a derived number; tune `DECISION_FLOOR` in `app/config.py` once data exists.
+
+Each run appends to `logs/weights_YYYYMMDD.json`, recording `old`, `new`,
+`delta` and `n`. `/api/trends` reads that directory back. Multiple runs on one
+day append rather than clobber.
+
+**The weight update rule is not settled.** What ships is a deliberately boring
+placeholder with a known scale-invariance defect. See
+[docs/weight-update-rule.md](docs/weight-update-rule.md) for the proposed
+replacement and what is wrong with the current one.
+
+## Smoke test
+
+Run this before pointing it at real postings:
 
 ```bash
-cd backend
-pip install -r requirements.txt
+.venv/bin/python -m pytest -q
 ```
 
-### 3. Configure environment
+It imports 5 fake jobs, swipes them, asserts snapshots are non-empty, asserts
+recalibrate refuses under the floor, seeds 50 decisions, asserts a log file is
+written and the weights actually moved, then restarts the app and asserts no
+state was lost.
 
-```bash
-cp .env.example .env
-# Edit .env — add OPENAI_API_KEY if you want LLM features
-```
+## Out of scope
 
-### 4. Run migrations
-
-```bash
-# from inside backend/
-alembic upgrade head
-```
-
-### 5. Start the server
-
-```bash
-flask --app app.main run
-# or: python -m app.main
-```
-
-The server starts at **http://localhost:5000** and serves both the API and the frontend UI.
-
----
-
-## Chrome Extension
-
-The `extension/` directory contains a Manifest V3 Chrome extension that captures LinkedIn job postings and sends them to your local server.
-
-To load it:
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked** → select the `extension/` folder
-
-The extension is already configured to talk to `http://localhost:5000`.
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/api/v1/ingest` | Capture a job posting |
-| GET | `/api/v1/jobs` | List all jobs |
-| GET | `/api/v1/jobs/<id>` | Get a single job |
-| PATCH | `/api/v1/jobs/<id>` | Update a job |
-| DELETE | `/api/v1/jobs/<id>` | Delete a job |
-| POST | `/api/v1/parse` | Parse job descriptions into structured fields |
-| POST | `/api/v1/analyze` | Analyze jobs with LLM (stub if no API key) |
-| POST | `/api/v1/resume` | Upload your resume text |
-| GET | `/api/v1/resume` | Get resume info |
-| POST | `/api/v1/cull` | Rank jobs against resume |
-
----
-
-## Tests
-
-```bash
-cd backend
-pytest                     # unit tests only (no DB required)
-pytest tests/integration/  # requires Postgres DATABASE_URL in .env
-```
-
----
-
-## LLM Configuration
-
-Works with any OpenAI-compatible API:
-
-```env
-# OpenAI
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini
-
-# Local (e.g. Ollama)
-OPENAI_BASE_URL=http://localhost:11434/v1
-OPENAI_MODEL=llama3
-# OPENAI_API_KEY can be empty for local servers
-```
-
-Without an API key the analyzer runs in stub mode (deterministic scores, no real LLM calls).
+Auth, deploy, Docker, multi-user, resume parsing, anything that writes back to
+JobScout.

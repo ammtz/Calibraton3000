@@ -1,205 +1,54 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>FilterJobs</title>
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div class="backdrop">
-      <div class="orb orb-one"></div>
-      <div class="orb orb-two"></div>
-      <div class="orb orb-three"></div>
-      <div class="grid-sheen"></div>
-    </div>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calibraton3000</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%E2%9A%96%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="counter" class="counter">
+    <span id="session-count">0</span> this session
+    <small id="remaining"></small>
+  </div>
 
-    <div class="app">
-      <header class="topbar">
-        <div class="brand">
-          <div class="logo">FJ</div>
-          <div class="brand-text">
-            <h1>FilterJobs</h1>
-            <p>Turn job chaos into a calm, ranked shortlist.</p>
-          </div>
-        </div>
-        <div class="status">
-          <span class="pill" id="apiStatus">API: unknown</span>
-          <button class="ghost" id="refreshBtn" type="button">Refresh</button>
-        </div>
-      </header>
+  <header class="brand">Calibraton<span>3000</span></header>
 
-      <main class="grid">
-        <section class="panel ingest">
-          <div class="panel-head">
-            <h2>Workspace</h2>
-            <p>Manage your resume and run analysis.</p>
-          </div>
+  <main id="stage">
+    <article id="card" class="card" hidden>
+      <div class="score" id="score">0.0</div>
+      <h1 id="title">—</h1>
+      <h2 id="company">—</h2>
+      <p id="blurb" class="blurb"></p>
 
-          <details class="settings-toggle">
-            <summary>⚙ Settings</summary>
-            <label class="field">
-              <span>API base URL</span>
-              <input id="apiBase" type="text" placeholder="http://localhost:5000" />
-            </label>
-          </details>
-
-          <div class="divider"></div>
-
-          <div class="panel-head">
-            <h3>Resume context</h3>
-            <p>Upload your PDF resume.</p>
-          </div>
-
-          <label class="field">
-            <span>Resume PDF</span>
-            <input id="resumeFile" type="file" accept="application/pdf" />
-          </label>
-
-          <div class="actions">
-            <button class="primary" id="uploadResumeBtn" type="button">Upload resume</button>
-          </div>
-          <div class="hint" id="resumeStatus">No resume uploaded yet.</div>
-
-          <div class="divider"></div>
-
-          <div class="panel-head">
-            <h3>Sort Things</h3>
-            <p>Identify and sort critical information of each saved job.</p>
-          </div>
-
-          <div class="actions">
-            <button class="primary" id="parseAllBtn" type="button">Sort Things</button>
-          </div>
-
-          <div class="divider"></div>
-
-          <div class="panel-head">
-            <h3>Training</h3>
-            <p>Compare two jobs head-to-head to train your personal scoring model.</p>
-          </div>
-
-          <div class="actions">
-            <button class="primary" id="abCompareBtn" type="button">Start Training</button>
-          </div>
-
-          <div class="divider"></div>
-
-          <div class="panel-head">
-            <h3>Rank Jobs</h3>
-            <p>Rank jobs by user preference and job affinity.</p>
-          </div>
-
-          <div class="actions">
-            <button class="primary" id="cullAllBtn" type="button">Rank Jobs</button>
-          </div>
-
-          <div class="selection-bar">
-            <span class="hint" id="selectionHint">0 selected</span>
-            <button class="danger hide" id="deleteSelectedBtn" type="button">Delete all selected</button>
-          </div>
-
-          <div class="divider"></div>
-
-          <label class="toggle">
-            <input id="analyzedOnly" type="checkbox" />
-            <span>Show analyzed only</span>
-          </label>
-
-          <div class="notice" id="toast"></div>
-        </section>
-
-        <section class="panel jobs">
-          <div class="panel-head">
-            <h2>Job board</h2>
-            <p id="jobCount">Loading jobs...</p>
-          </div>
-
-          <div class="job-list" id="jobList"></div>
-        </section>
-      </main>
-    </div>
-
-    <div class="modal hidden" id="abModal" aria-hidden="true">
-      <div class="ab-modal-card">
-        <div class="modal-head">
-          <h3 id="abStatus">Which role fits you better?</h3>
-          <div class="actions small">
-            <button class="secondary" id="abSkipBtn" type="button">Skip pair</button>
-            <button class="ghost" id="abCloseBtn" type="button">Close</button>
-          </div>
-        </div>
-        <div class="ab-comparison" id="abComparison"></div>
+      <div class="flags">
+        <label><input type="checkbox" id="would-apply"> I would apply</label>
+        <label><input type="checkbox" id="would-get"> I would get it</label>
       </div>
-    </div>
+    </article>
 
-    <div class="modal hidden" id="detailModal" aria-hidden="true">
-      <div class="modal-card">
-        <div class="modal-head">
-          <div>
-            <h3 id="detailTitle">Job details</h3>
-            <p id="detailMeta"></p>
-          </div>
-          <div class="actions small">
-            <button class="primary" id="saveJobBtn" type="button">Save changes</button>
-            <button class="danger" id="deleteJobBtn" type="button">Delete</button>
-            <button class="ghost" id="closeModal" type="button">Close</button>
-          </div>
-        </div>
-        <div class="modal-body">
-          <section>
-            <h4>Overview</h4>
-            <div class="field-grid">
-              <label class="field">
-                <span>Title</span>
-                <input id="detailTitleInput" type="text" />
-              </label>
-              <label class="field">
-                <span>Company</span>
-                <input id="detailCompanyInput" type="text" />
-              </label>
-              <label class="field">
-                <span>Location</span>
-                <input id="detailLocationInput" type="text" />
-              </label>
-              <label class="field">
-                <span>Job URL</span>
-                <input id="detailUrlInput" type="text" />
-              </label>
-            </div>
-            <div class="hint">
-              <a id="detailUrlLink" href="#" target="_blank" rel="noreferrer">Open posting</a>
-            </div>
-          </section>
-          <section>
-            <h4>Recommendation</h4>
-            <p id="detailRecommendation">-</p>
-          </section>
-          <section>
-            <h4>Reasoning</h4>
-            <p id="detailReasoning">-</p>
-          </section>
-          <section>
-            <h4>Downsides</h4>
-            <p id="detailDownsides">-</p>
-          </section>
-          <section>
-            <h4>Raw text</h4>
-            <pre id="detailRaw"></pre>
-          </section>
-          <section>
-            <h4>Structured Requirements</h4>
-            <div id="detailStructured"></div>
-          </section>
-          <section>
-            <h4>Analysis payload</h4>
-            <pre id="detailAnalysis"></pre>
-          </section>
-        </div>
-      </div>
-    </div>
+    <p id="empty" class="empty" hidden>No jobs left to swipe. Import a batch from JobScout.</p>
+  </main>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
-    <script src="app.js"></script>
-  </body>
+  <nav class="actions">
+    <button id="btn-dislike" class="btn dislike" title="Left arrow">✕ Dislike</button>
+    <button id="btn-like" class="btn like" title="Right arrow">♥ Like</button>
+  </nav>
+
+  <footer class="footer">
+    <button id="btn-end" class="link">End session &amp; recalibrate</button>
+    <button id="btn-trends" class="link">Trends</button>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <dialog id="trends-dialog">
+    <h3>Weight drift</h3>
+    <pre id="trends-body">—</pre>
+    <button id="btn-close-trends" class="link">Close</button>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
 </html>
