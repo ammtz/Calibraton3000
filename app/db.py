@@ -40,6 +40,29 @@ def create_all() -> None:
     from app import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """Add columns that create_all() cannot add to a table that already exists.
+
+    There is no migration tool here on purpose, but silently running against a
+    database missing a column fails much later and much more confusingly than
+    one ALTER at startup.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing or not column.nullable:
+                continue
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column.type.compile(engine.dialect)}'
+            with engine.begin() as conn:
+                conn.execute(text(ddl))
 
 
 @contextmanager

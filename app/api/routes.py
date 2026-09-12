@@ -183,6 +183,82 @@ def record_decision():
     }), 201
 
 
+@bp.get("/pending")
+def pending():
+    """Decisions not yet carried anywhere else, newest last.
+
+    The core service has no network. It keeps this ledger; a separate process
+    reads it, does whatever delivery means, and acknowledges via /api/synced.
+    """
+    try:
+        limit = min(int(request.args.get("limit", 100)), 500)
+    except ValueError:
+        return _bad("limit must be an integer", 422)
+
+    with get_db() as db:
+        rows = db.scalars(
+            select(Decision).where(Decision.synced_at.is_(None))
+            .order_by(Decision.decided_at).limit(limit)
+        ).all()
+
+        out = []
+        for decision in rows:
+            job = db.get(Job, decision.job_id)
+            out.append({
+                "decision_id": decision.id,
+                "rating": decision.rating,
+                "label": RATINGS[decision.rating],
+                "would_apply": decision.would_apply,
+                "would_get": decision.would_get,
+                "decided_at": decision.decided_at.isoformat() if decision.decided_at else None,
+                "session_id": decision.session_id,
+                "attempted": decision.sync_error is not None,
+                "last_error": decision.sync_error,
+                "source_id": job.source_id if job else None,
+                # The payload exactly as ingested, so a delivery process can
+                # find whatever handle it needs without the core knowing about it.
+                "card": job.card if job else {},
+            })
+        return jsonify({"pending": out, "count": len(out)})
+
+
+@bp.post("/synced")
+def mark_synced():
+    """Acknowledge delivery. `delivered` clears a decision; `failed` records why."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _bad("Request body must be a JSON object")
+
+    delivered = data.get("delivered") or []
+    failed = data.get("failed") or {}
+    if not isinstance(delivered, list) or not isinstance(failed, dict):
+        return _bad("delivered must be a list of ids, failed a {id: reason} object", 422)
+
+    now = datetime.now(timezone.utc)
+    cleared = recorded = 0
+    with get_db() as db:
+        for decision_id in delivered:
+            decision = db.get(Decision, decision_id)
+            if decision is None:
+                continue
+            decision.synced_at = now
+            decision.sync_error = None
+            cleared += 1
+        for decision_id, reason in failed.items():
+            decision = db.get(Decision, int(decision_id))
+            if decision is None:
+                continue
+            # Stays pending on purpose. A failure is a retry, not a loss.
+            decision.sync_error = str(reason)[:1000]
+            recorded += 1
+        db.commit()
+        still_pending = db.scalar(
+            select(func.count(Decision.id)).where(Decision.synced_at.is_(None))
+        ) or 0
+
+    return jsonify({"cleared": cleared, "errors_recorded": recorded, "still_pending": still_pending})
+
+
 @bp.post("/recalibrate")
 def do_recalibrate():
     """Session end only. Refuses under the decision floor."""

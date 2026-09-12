@@ -242,3 +242,78 @@ def test_any_domain_works(client, sandbox):
     assert result["new"]["tannin"] > 0.2, (
         f"the planted bias must surface in any domain, got {result['new'].get('tannin')}")
     assert set(result["new"]) <= {"acidity", "tannin", "oak", "price"}
+
+
+# --------------------------------------------------------------------------
+# Outbox: the ledger of decisions not yet carried anywhere else
+# --------------------------------------------------------------------------
+
+def test_every_decision_starts_pending(client):
+    client.post("/api/jobs", json={"cards": scored_cards(3)})
+    for _ in range(3):
+        job = client.get("/api/next").get_json()["job"]
+        client.post("/api/decision", json={
+            "job_id": job["id"], "rating": 4, "session_id": "s"})
+
+    body = client.get("/api/pending").get_json()
+    assert body["count"] == 3
+    item = body["pending"][0]
+    assert item["rating"] == 4 and item["label"] == "Ok"
+    assert item["source_id"].startswith("job_")
+    assert item["card"], "the delivery process needs the payload as ingested"
+    assert item["attempted"] is False
+
+
+def test_delivery_clears_and_failure_retries(client):
+    client.post("/api/jobs", json={"cards": scored_cards(2)})
+    ids = []
+    for _ in range(2):
+        job = client.get("/api/next").get_json()["job"]
+        res = client.post("/api/decision", json={
+            "job_id": job["id"], "rating": 5, "session_id": "s"})
+        ids.append(res.get_json()["decision_id"])
+
+    res = client.post("/api/synced", json={
+        "delivered": [ids[0]],
+        "failed": {str(ids[1]): "Notion already says 2 Bad"},
+    }).get_json()
+    assert res["cleared"] == 1 and res["errors_recorded"] == 1
+
+    # A failure stays pending: it is a retry, never a loss.
+    assert res["still_pending"] == 1
+    pending = client.get("/api/pending").get_json()["pending"]
+    assert [p["decision_id"] for p in pending] == [ids[1]]
+    assert pending[0]["attempted"] is True
+    assert "already says" in pending[0]["last_error"]
+
+    # A later success clears the error along with the row.
+    client.post("/api/synced", json={"delivered": [ids[1]]})
+    assert client.get("/api/pending").get_json()["count"] == 0
+
+
+def test_sync_never_blocks_or_alters_the_correction(client, sandbox):
+    """Delivery state is bookkeeping. It must not touch the learning loop."""
+    client.post("/api/jobs", json={"cards": scored_cards(60)})
+    swipe_everything(client, rater=rate_card)
+
+    unsynced = client.post("/api/recalibrate").get_json()
+    assert client.get("/api/pending").get_json()["count"] == 60
+
+    ids = [p["decision_id"] for p in client.get("/api/pending").get_json()["pending"]]
+    client.post("/api/synced", json={"delivered": ids})
+    assert client.get("/api/pending").get_json()["count"] == 0
+
+    from app.calibration import save_correction
+    save_correction({}, sandbox["correction"])
+    synced = client.post("/api/recalibrate").get_json()
+    assert synced["new"] == unsynced["new"], "syncing must not change what is learned"
+
+
+def test_notion_page_id_survives_urls_and_dashes():
+    from tools.sync_to_notion import page_id_from
+
+    plain = "3d4e25c84dd181cb8e13cfc88ecb71c2"
+    assert page_id_from({"notion_page_url": f"https://app.notion.com/p/{plain}"}) == plain
+    assert page_id_from({"notion_page_url": f"https://notion.so/Role-{plain}?pvs=4"}) == plain
+    assert page_id_from({"notion_page_id": plain}) == plain
+    assert page_id_from({}) is None

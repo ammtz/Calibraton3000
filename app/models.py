@@ -101,4 +101,10 @@ class Decision(Base):
     session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     decided_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
+    # Outbox. A decision is pending until something acknowledges carrying it
+    # somewhere else. The core service never does that itself — it has no
+    # network — it just keeps the ledger honest for whatever does.
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True)
+    sync_error: Mapped[Optional[str]] = mapped_column(Text)
+
     job: Mapped["Job"] = relationship(back_populates="decisions")

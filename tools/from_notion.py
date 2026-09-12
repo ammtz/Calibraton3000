@@ -53,6 +53,9 @@ def build(rows: list[dict]) -> dict:
             "points": points,          # absent dimension = unknown, never zero
             "known_total": len(DIMENSIONS),
             "excluded": False,
+            # Carried through so the sync can find this row again. Calibraton
+            # stores the payload verbatim and never looks at this field.
+            "notion_page_url": row.get("url"),
         })
 
     return {"source": "JobScout", "cards": cards}

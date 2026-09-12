@@ -88,12 +88,33 @@ The Notion database already carries a `Rating` property on the identical
 five-point scale (`5 Great … 1 No way`), a `Rating why` line, and an `In MATRIX`
 flag set by JobScout's own sync.
 
-**Calibraton's deck does not write there.** Ratings made in the deck live in
-Calibraton's SQLite and nothing reconciles them with Notion today. That is a
-known, accepted gap — the deck exists because rating 50+ cards with number keys
-beats 50 page opens — but it means a card can carry a rating in one place and
-not the other. If the two ever need to agree, that reconciliation is a thing to
-build on purpose, not to assume.
+`tools/sync_to_notion.py` closes the loop:
+
+```bash
+export NOTION_TOKEN=secret_...              # Windows: set NOTION_TOKEN=...
+python tools/sync_to_notion.py --dry-run    # show what would be written
+python tools/sync_to_notion.py --watch      # deliver as you rate
+```
+
+It writes `Rating` and `Rated on`, and **nothing else** — `In MATRIX` is
+JobScout's to set, as its own description says. Since that sync turns a Rating
+into a training label, a rating made in the deck becomes a MATRIX label the
+same as one typed into Notion by hand.
+
+Three things it does deliberately:
+
+- **Never blocks a swipe.** Ratings land in SQLite instantly and sit in an
+  outbox; delivery is a separate process. Notion being slow or down cannot
+  stall the deck, which was the whole reason for having a deck.
+- **Leaves an existing Notion rating alone** and reports it, rather than
+  overwriting a call you may have made deliberately there. `--overwrite` flips
+  that.
+- **A failure stays pending.** It is recorded with its reason and retried, never
+  marked done. `GET /api/pending` shows anything stuck and why.
+
+The page handle comes from `notion_page_url`, carried through by
+`tools/from_notion.py`. A batch exported before that field existed has no
+handle and the sync will say so — re-export rather than guessing.
 
 ## Consuming the correction
 

@@ -39,6 +39,11 @@ Then load a batch and start rating:
 Open <http://127.0.0.1:5000> and rate with the number keys. The correction
 refuses to move until 50 decisions are in.
 
+Ratings are also kept in an outbox so another process can carry them
+elsewhere. `GET /api/pending` lists what has not been delivered;
+`POST /api/synced` acknowledges it. The core service never delivers anything
+itself — it has no network. See `tools/sync_to_notion.py` for one that does.
+
 ## Layout
 
 ```
@@ -66,6 +71,8 @@ docs/adapters/             worked examples
 | POST | `/api/recalibrate` | Recompute the correction, write the log |
 | GET | `/api/correction` | **The deliverable.** Current correction vector |
 | GET | `/api/trends` | Drift history as JSON |
+| GET | `/api/pending` | Decisions not yet carried elsewhere |
+| POST | `/api/synced` | Acknowledge delivery, or record why it failed |
 
 ## Design rules
 
