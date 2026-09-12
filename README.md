@@ -30,6 +30,15 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 SQLite lands at `./data/calibraton.db`.
 
+Then load a batch and start rating:
+
+```bash
+.venv/bin/python tools/post_batch.py batch.json    # Windows: .venv\Scripts\python
+```
+
+Open <http://127.0.0.1:5000> and rate with the number keys. The correction
+refuses to move until 50 decisions are in.
+
 ## Layout
 
 ```
