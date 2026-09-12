@@ -1,4 +1,4 @@
-/* Calibraton3000 swipe UI. Vanilla, no build step. */
+/* Calibraton3000. You gut-check JobScout's placement; it learns where it is wrong. */
 (() => {
   "use strict";
 
@@ -9,16 +9,12 @@
   const el = (id) => document.getElementById(id);
   const card = el("card");
   const empty = el("empty");
-  const btnLike = el("btn-like");
-  const btnDislike = el("btn-dislike");
+  const buttons = [...document.querySelectorAll("[data-rating]")];
   const wouldApply = el("would-apply");
   const wouldGet = el("would-get");
 
   let current = null;
-  let sessionCount = 0;
   let busy = false;
-
-  // ---- helpers ----------------------------------------------------------
 
   async function api(path, options) {
     const res = await fetch(path, {
@@ -40,11 +36,8 @@
 
   function setBusy(state) {
     busy = state;
-    btnLike.disabled = state;
-    btnDislike.disabled = state;
+    buttons.forEach((b) => { b.disabled = state; });
   }
-
-  // ---- rendering --------------------------------------------------------
 
   function render(job, remaining) {
     current = job;
@@ -60,10 +53,25 @@
     empty.hidden = true;
     card.hidden = false;
     card.className = "card";
+
+    if (job.scored) {
+      el("rank").textContent =
+        job.rank && job.rank_total ? `#${job.rank} of ${job.rank_total}` : "ranked";
+      el("rank").className = "rank";
+      el("prompt").textContent = "Did JobScout put this in the right place?";
+    } else {
+      // No rank to check, so the rating reads as an absolute call. Trained apart.
+      el("rank").textContent = "UNSCORED";
+      el("rank").className = "rank unscored";
+      el("prompt").textContent = "JobScout couldn't score this one. Call it yourself.";
+    }
+
+    el("known").textContent =
+      job.known != null && job.known_total ? `${job.known}/${job.known_total} known` : "";
     el("title").textContent = job.title || "Untitled role";
     el("company").textContent = job.company || "Unknown company";
     el("blurb").textContent = job.blurb || "";
-    el("score").textContent = Number(job.score ?? 0).toFixed(1);
+
     wouldApply.checked = false;
     wouldGet.checked = false;
     setBusy(false);
@@ -71,22 +79,20 @@
 
   async function loadNext() {
     const { ok, body } = await api("/api/next");
-    if (!ok) { toast("Could not load the next job."); return; }
+    if (!ok) { toast("Could not load the next card."); return; }
     render(body.job, body.remaining);
   }
 
-  // ---- swiping ----------------------------------------------------------
-
-  async function swipe(verdict) {
+  async function rate(rating) {
     if (busy || !current) return;
     setBusy(true);
-    card.classList.add(verdict === "like" ? "gone-right" : "gone-left");
+    card.classList.add(rating >= 4 ? "gone-right" : rating <= 2 ? "gone-left" : "gone-down");
 
     const { ok, body } = await api("/api/decision", {
       method: "POST",
       body: JSON.stringify({
         job_id: current.id,
-        verdict,
+        rating,
         would_apply: wouldApply.checked,
         would_get: wouldGet.checked,
         session_id: SESSION_ID,
@@ -94,46 +100,43 @@
     });
 
     if (!ok) {
-      toast(body.detail || "Could not record that swipe.");
+      toast(body.detail || "Could not record that rating.");
       card.className = "card";
       setBusy(false);
       return;
     }
 
-    sessionCount = body.session_count;
-    el("session-count").textContent = sessionCount;
+    el("session-count").textContent = body.session_count;
     setTimeout(loadNext, 160);
   }
 
-  btnLike.addEventListener("click", () => swipe("like"));
-  btnDislike.addEventListener("click", () => swipe("dislike"));
+  buttons.forEach((b) => b.addEventListener("click", () => rate(Number(b.dataset.rating))));
 
   document.addEventListener("keydown", (event) => {
     if (event.target.matches("input, textarea")) return;
-    if (event.key === "ArrowRight") swipe("like");
-    if (event.key === "ArrowLeft") swipe("dislike");
+    const key = Number(event.key);
+    if (key >= 1 && key <= 5) rate(key);
+    // Arrows kept for the extremes; the middle three need a number.
+    if (event.key === "ArrowLeft") rate(1);
+    if (event.key === "ArrowRight") rate(5);
   });
 
-  // Touch swipe. Optional sugar; buttons and keys remain the real interface.
   let touchStartX = null;
   card.addEventListener("touchstart", (e) => { touchStartX = e.changedTouches[0].clientX; }, { passive: true });
   card.addEventListener("touchend", (e) => {
     if (touchStartX === null) return;
     const dx = e.changedTouches[0].clientX - touchStartX;
     touchStartX = null;
-    if (Math.abs(dx) > 70) swipe(dx > 0 ? "like" : "dislike");
+    if (Math.abs(dx) > 70) rate(dx > 0 ? 5 : 1);
   }, { passive: true });
-
-  // ---- session end ------------------------------------------------------
 
   el("btn-end").addEventListener("click", async () => {
     const { body } = await api("/api/recalibrate", { method: "POST" });
-    if (body.status === "refused") {
-      toast(body.reason, 6000);
-      return;
-    }
+    if (body.status === "refused") { toast(body.reason, 6000); return; }
     const moved = Object.values(body.delta || {}).filter((d) => Math.abs(d) > 1e-9).length;
-    toast(`Recalibrated on ${body.n} decisions. ${moved} weight(s) moved. Logged to ${body.log}.`, 7000);
+    toast(
+      `Recalibrated on ${body.trained_on} of ${body.n} decisions. ` +
+      `${moved} dimension(s) moved. Logged to ${body.log}.`, 7000);
   });
 
   el("btn-trends").addEventListener("click", async () => {

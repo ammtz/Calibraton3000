@@ -17,10 +17,16 @@
 
   <main id="stage">
     <article id="card" class="card" hidden>
-      <div class="score" id="score">0.0</div>
+      <div class="placement">
+        <span id="rank" class="rank">—</span>
+        <span id="known" class="known"></span>
+      </div>
+
       <h1 id="title">—</h1>
       <h2 id="company">—</h2>
       <p id="blurb" class="blurb"></p>
+
+      <p id="prompt" class="prompt">Did JobScout put this in the right place?</p>
 
       <div class="flags">
         <label><input type="checkbox" id="would-apply"> I would apply</label>
@@ -28,23 +34,26 @@
       </div>
     </article>
 
-    <p id="empty" class="empty" hidden>No jobs left to swipe. Import a batch from JobScout.</p>
+    <p id="empty" class="empty" hidden>Nothing left to swipe. Export another batch from JobScout.</p>
   </main>
 
-  <nav class="actions">
-    <button id="btn-dislike" class="btn dislike" title="Left arrow">✕ Dislike</button>
-    <button id="btn-like" class="btn like" title="Right arrow">♥ Like</button>
+  <nav id="actions" class="actions">
+    <button class="btn r1" data-rating="1"><b>No way</b><kbd>1</kbd></button>
+    <button class="btn r2" data-rating="2"><b>Bad</b><kbd>2</kbd></button>
+    <button class="btn r3" data-rating="3"><b>Meh</b><kbd>3</kbd></button>
+    <button class="btn r4" data-rating="4"><b>Ok</b><kbd>4</kbd></button>
+    <button class="btn r5" data-rating="5"><b>Great</b><kbd>5</kbd></button>
   </nav>
 
   <footer class="footer">
     <button id="btn-end" class="link">End session &amp; recalibrate</button>
-    <button id="btn-trends" class="link">Trends</button>
+    <button id="btn-trends" class="link">Drift</button>
   </footer>
 
   <div id="toast" class="toast" hidden></div>
 
   <dialog id="trends-dialog">
-    <h3>Weight drift</h3>
+    <h3>Correction drift</h3>
     <pre id="trends-body">—</pre>
     <button id="btn-close-trends" class="link">Close</button>
   </dialog>

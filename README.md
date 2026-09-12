@@ -1,10 +1,23 @@
 # Calibraton3000
 
-Swipe job postings. Store every decision with the criteria that produced it.
-Recompute scoring weights from those decisions. Log the drift.
+**JobScout ranks the jobs. You gut-check the ranking. Calibraton tells JobScout
+where its weighting is wrong.**
 
-One Flask app, one SQLite file. No scraper, no LLM, no network calls —
-JobScout already scores; two rankers is one too many.
+One Flask app, one SQLite file. No scraper, no LLM, no network calls — and no
+score of its own. JobScout already scores; two rankers is one too many.
+
+## What it actually does
+
+1. Imports JobScout's ranked cards (`worker.py export` → `POST /api/jobs`).
+2. Shows you one card at a time with **JobScout's** rank, score and coverage.
+3. You rate 1–5: *did JobScout put this in the right place?*
+4. On session end it computes a **per-dimension correction** — "you under-value
+   `trajectory` by 0.28 rating points per standard deviation" — and writes it to
+   `config/correction.json`.
+5. JobScout's matrix reads that file and weights it however it likes.
+
+Nothing is ever written back into the MATRIX. See
+[docs/jobscout-contract.md](docs/jobscout-contract.md) for the exact boundary.
 
 ## Run it
 
@@ -13,95 +26,85 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python run.py       # http://127.0.0.1:5000
 ```
 
-That starts everything. SQLite lands at `./data/calibraton.db`.
+SQLite lands at `./data/calibraton.db`.
 
 ## Layout
 
 ```
-run.py                  entry point
-app/config.py           paths, DECISION_FLOOR
-app/models.py           jobs, decisions — the whole data model
-app/scoring.py          criteria -> features -> weighted sum
-app/calibration.py      learning loop, drift log, trends
-app/api/routes.py       the six endpoints
-frontend/               vanilla JS swipe UI, no build step
-config/weights.json     flat float weights, git-tracked
-logs/weights_*.json     weight history, one file per day
-docs/                   weight update rule proposal
+run.py                     entry point
+app/config.py              paths, DECISION_FLOOR, MIN_SUPPORT, DAMPING
+app/models.py              jobs, decisions — the whole data model
+app/criteria.py            the 13 dimensions; unknown stays unknown
+app/calibration.py         the correction rule, drift log, trends
+app/api/routes.py          the endpoints
+frontend/                  vanilla JS, no build step
+config/correction.json     the deliverable, git-tracked
+logs/correction_*.json     drift history, one file per day
+docs/                      the contract and the rule
 ```
 
 ## Endpoints
 
 | Method | Path | Does |
 |---|---|---|
-| GET | `/` | Serve swipe UI |
-| POST | `/api/jobs` | Bulk import JobScout JSON (idempotent on `source_id`) |
-| GET | `/api/next` | Next unswiped job, scored with current weights |
-| POST | `/api/decision` | Record one swipe |
-| POST | `/api/recalibrate` | Recompute weights, write log |
-| GET | `/api/trends` | Weight history as JSON |
+| GET | `/` | Serve the swipe UI |
+| POST | `/api/jobs` | Import a JobScout export (idempotent on `card_id`) |
+| GET | `/api/next` | Next unswiped card |
+| POST | `/api/decision` | Record one 1–5 rating |
+| POST | `/api/recalibrate` | Recompute the correction, write the log |
+| GET | `/api/correction` | **The agent-facing read.** Current correction vector |
+| GET | `/api/trends` | Drift history as JSON |
 
-### Importing from JobScout
+`/api/correction` is one past the six in the spec. It exists because the whole
+point is that JobScout's agents can read this — serving it out of a file on disk
+only works if they share a filesystem.
 
-`POST /api/jobs` takes a JSON array, or `{"jobs": [...]}`:
+## The 13 dimensions
 
-```json
-[
-  {
-    "source_id": "js-0001",
-    "title": "Staff Engineer",
-    "company": "Acme",
-    "blurb": "Why this fits: small team, you own the toolchain.",
-    "criteria": { "seniority_fit": 0.9, "remote": true, "comp": { "base": 190000 } }
-  }
-]
-```
+| Fit | P(hire) |
+|---|---|
+| pay, security, trajectory, location, industry, company_size, public_signals | pillar_overlap, tn_sponsorship, seniority_match, domain_overlap, posting_freshness, pool_thinness |
 
-`criteria` is JobScout's raw fields, stored untouched. Re-importing the same
-`source_id` is a no-op.
+**Unknown is absent, never zero** — end to end. A dimension JobScout could not
+establish is dropped from the card, dropped from the math, and dropped from the
+output rather than corrected to zero on no evidence.
 
-## Scoring
+## The deck
 
-Plain weighted sum. `criteria` is flattened to numeric features — bools to
-1/0, nested objects to dotted keys (`comp.base`), numeric lists to their mean,
-non-numeric values dropped — then `score = Σ weight[k] × feature[k]`.
+| Card kind | Reaches the deck? | Why |
+|---|---|---|
+| Scored and ranked | Yes | The rating is a gut check on its placement |
+| Unscored (a half unknown) | Yes, tagged | No rank to check, so the rating is an absolute call — stored and summarized apart, never folded into the correction |
+| Excluded (ITAR, sub-floor, junior) | No | JobScout took it off the ranking; there is no placement to check |
 
-Criteria with no matching weight contribute nothing, so a weight key that does
-not exist in your JobScout output is inert rather than silently wrong.
+## Ratings
 
-> **`config/weights.json` currently holds placeholder keys.** Replace them with
-> JobScout's actual criterion names on first real import. Until then every card
-> scores 0.
+`1 No way · 2 Bad · 3 Meh · 4 Ok · 5 Great` — buttons, number keys 1–5, or
+arrows/swipe for the two extremes.
 
-## Learning loop
+**Meh counts toward the floor but trains nothing.** Clearing a card is a real
+decision; indifference is not a vote.
 
-Runs on session end (the UI's *End session & recalibrate* button), never
-mid-session. Refuses to move anything under **50 decisions** — a guardrail, not
-a derived number; tune `DECISION_FLOOR` in `app/config.py` once data exists.
+## The correction rule
 
-Each run appends to `logs/weights_YYYYMMDD.json`, recording `old`, `new`,
-`delta` and `n`. `/api/trends` reads that directory back. Multiple runs on one
-day append rather than clobber.
-
-**The weight update rule is not settled.** What ships is a deliberately boring
-placeholder with a known scale-invariance defect. See
-[docs/weight-update-rule.md](docs/weight-update-rule.md) for the proposed
-replacement and what is wrong with the current one.
+Covariance of your rank-residual with each dimension, damped 50% against the
+previous run. Refuses to move under **50 decisions** — a guardrail, not a
+derived number. Full rationale and the open parameters:
+[docs/correction-rule.md](docs/correction-rule.md).
 
 ## Smoke test
-
-Run this before pointing it at real postings:
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
-It imports 5 fake jobs, swipes them, asserts snapshots are non-empty, asserts
-recalibrate refuses under the floor, seeds 50 decisions, asserts a log file is
-written and the weights actually moved, then restarts the app and asserts no
-state was lost.
+Imports cards, drains the deck, asserts snapshots carry the rank they were
+judged against, asserts recalibrate refuses under the floor, seeds 60+
+decisions, asserts a log is written — and asserts the correction **finds a
+deliberately planted bias** while leaving thin and constant dimensions absent.
+Then restarts the app and asserts no state was lost.
 
 ## Out of scope
 
-Auth, deploy, Docker, multi-user, resume parsing, anything that writes back to
-JobScout.
+Auth, deploy, Docker, multi-user, resume parsing, and anything at all that
+writes back to JobScout.

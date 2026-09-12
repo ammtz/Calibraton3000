@@ -11,10 +11,17 @@ LOGS_DIR = ROOT / "logs"
 FRONTEND_DIR = ROOT / "frontend"
 
 DB_PATH = DATA_DIR / "calibraton.db"
-WEIGHTS_PATH = CONFIG_DIR / "weights.json"
+CORRECTION_PATH = CONFIG_DIR / "correction.json"
 
 # Guardrail, not a derived number. Tune once real data exists (see docs/).
 DECISION_FLOOR = 50
+
+# A dimension seen in fewer decisions than this is left out of the correction
+# entirely, rather than corrected on noise. Absent, never zero.
+MIN_SUPPORT = 10
+
+# How hard one session can swing the correction. 0 = frozen, 1 = no memory.
+DAMPING = 0.5
 
 HOST = "127.0.0.1"
 PORT = 5000

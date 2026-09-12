@@ -1,4 +1,4 @@
-"""The six endpoints. Nothing here reaches the network."""
+"""The endpoints. Nothing here reaches the network, and nothing re-ranks."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,10 +7,10 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import func, select
 
 from app import config
-from app.calibration import read_trends, recalibrate
+from app.calibration import load_correction, read_trends, recalibrate
+from app.criteria import ALL_DIMENSIONS, coverage, known_points
 from app.db import get_db
-from app.models import Decision, Job, VERDICTS
-from app.scoring import flatten_criteria, load_weights, score_features
+from app.models import Decision, Job, RATINGS
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -21,40 +21,63 @@ def _bad(msg: str, code: int = 400):
 
 @bp.post("/jobs")
 def import_jobs():
-    """Bulk import JobScout JSON. Idempotent on source_id."""
+    """Import a `worker.py export` payload. Idempotent on card id.
+
+    Excluded cards are refused on purpose: JobScout took them off the ranking,
+    so there is no placement to gut-check. Unscored cards are kept — they land
+    in the deck tagged, and train separately.
+    """
     payload = request.get_json(silent=True)
     if payload is None:
         return _bad("Request body must be JSON")
-    items = payload.get("jobs") if isinstance(payload, dict) else payload
-    if not isinstance(items, list):
-        return _bad("Expected a JSON array of jobs, or {\"jobs\": [...]}", 422)
+    cards = payload.get("cards") if isinstance(payload, dict) else payload
+    if not isinstance(cards, list):
+        return _bad('Expected {"cards": [...]} or a JSON array of cards', 422)
 
-    imported, skipped, errors = 0, 0, []
+    imported = skipped = excluded = 0
+    errors: list[str] = []
+
     with get_db() as db:
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                errors.append(f"job[{index}]: not an object")
-                continue
-            source_id = str(item.get("source_id") or item.get("id") or "").strip()
-            if not source_id:
-                errors.append(f"job[{index}]: missing source_id")
-                continue
-            criteria = item.get("criteria")
-            if criteria is not None and not isinstance(criteria, dict):
-                errors.append(f"job[{index}]: criteria must be an object")
+        for index, card in enumerate(cards):
+            if not isinstance(card, dict):
+                errors.append(f"card[{index}]: not an object")
                 continue
 
-            existing = db.scalar(select(Job).where(Job.source_id == source_id))
-            if existing:
+            source_id = str(card.get("card_id") or card.get("source_id") or card.get("id") or "").strip()
+            if not source_id:
+                errors.append(f"card[{index}]: missing card_id")
+                continue
+
+            if card.get("excluded"):
+                excluded += 1
+                continue
+
+            points_raw = card.get("points")
+            if points_raw is not None and not isinstance(points_raw, dict):
+                errors.append(f"card[{index}]: points must be an object")
+                continue
+
+            if db.scalar(select(Job).where(Job.source_id == source_id)):
                 skipped += 1
                 continue
 
+            points = known_points(points_raw)
+            known, known_total = coverage(points)
+            scored = bool(card.get("scored", card.get("score") is not None))
+
             db.add(Job(
                 source_id=source_id,
-                title=item.get("title"),
-                company=item.get("company"),
-                blurb=item.get("blurb"),
-                criteria=criteria or {},
+                title=card.get("title"),
+                company=card.get("company"),
+                blurb=card.get("blurb"),
+                criteria=points,
+                scored=scored,
+                jobscout_score=card.get("score"),
+                jobscout_rank=card.get("rank"),
+                rank_total=card.get("rank_total"),
+                known=card.get("known", known),
+                known_total=card.get("known_total", known_total),
+                card=card,
                 imported_at=datetime.now(timezone.utc),
             ))
             imported += 1
@@ -64,6 +87,7 @@ def import_jobs():
     return jsonify({
         "imported": imported,
         "skipped": skipped,
+        "excluded": excluded,
         "errors": errors,
         "total_jobs": total,
     }), (201 if imported else 200)
@@ -71,23 +95,22 @@ def import_jobs():
 
 @bp.get("/next")
 def next_job():
-    """Oldest job with no decision on it yet, scored with current weights."""
-    weights = load_weights()
+    """Next unswiped card. Shows JobScout's numbers; Calibraton computes none."""
     with get_db() as db:
         decided = select(Decision.job_id)
         job = db.scalar(
-            select(Job).where(Job.id.not_in(decided)).order_by(Job.imported_at, Job.id).limit(1)
+            select(Job).where(Job.id.not_in(decided))
+            .order_by(Job.scored.desc(), Job.jobscout_rank, Job.imported_at, Job.id)
+            .limit(1)
         )
-        remaining = db.scalar(
-            select(func.count(Job.id)).where(Job.id.not_in(decided))
-        ) or 0
-        if job is None:
-            return jsonify({"job": None, "remaining": 0, "total_decisions": db.scalar(select(func.count(Decision.id))) or 0})
-        score = score_features(flatten_criteria(job.criteria), weights)
+        remaining = db.scalar(select(func.count(Job.id)).where(Job.id.not_in(decided))) or 0
+        total_decisions = db.scalar(select(func.count(Decision.id))) or 0
+
         return jsonify({
-            "job": job.as_card(score),
+            "job": job.as_card() if job else None,
             "remaining": remaining,
-            "total_decisions": db.scalar(select(func.count(Decision.id))) or 0,
+            "total_decisions": total_decisions,
+            "floor": config.DECISION_FLOOR,
         })
 
 
@@ -97,40 +120,43 @@ def record_decision():
     if not isinstance(data, dict):
         return _bad("Request body must be a JSON object")
 
-    verdict = str(data.get("verdict") or "").strip().lower()
-    if verdict not in VERDICTS:
-        return _bad(f"verdict must be one of {list(VERDICTS)}", 422)
+    rating = data.get("rating")
+    if not isinstance(rating, int) or isinstance(rating, bool) or rating not in RATINGS:
+        return _bad(f"rating must be an integer in {sorted(RATINGS)}", 422)
 
     session_id = str(data.get("session_id") or "").strip()
     if not session_id:
         return _bad("session_id is required", 422)
 
-    job_id = data.get("job_id")
-    if not isinstance(job_id, int):
-        try:
-            job_id = int(job_id)
-        except (TypeError, ValueError):
-            return _bad("job_id must be an integer", 422)
+    try:
+        job_id = int(data.get("job_id"))
+    except (TypeError, ValueError):
+        return _bad("job_id must be an integer", 422)
 
-    weights = load_weights()
     with get_db() as db:
         job = db.get(Job, job_id)
         if job is None:
             return _bad("Job not found", 404)
 
-        features = flatten_criteria(job.criteria)
+        # Frozen at swipe time. Carries JobScout's placement too, because the
+        # residual is meaningless without the rank it was measured against.
         snapshot = {
-            "criteria": job.criteria or {},
-            "features": features,
-            "weights": weights,
-            "score": score_features(features, weights),
+            "points": job.criteria or {},
+            "scored": job.scored,
+            "score": job.jobscout_score,
+            "rank": job.jobscout_rank,
+            "rank_total": job.rank_total,
+            "known": job.known,
+            "known_total": job.known_total,
+            "correction": load_correction(),
         }
 
         decision = Decision(
             job_id=job.id,
-            verdict=verdict,
+            rating=rating,
             would_apply=bool(data.get("would_apply", False)),
             would_get=bool(data.get("would_get", False)),
+            was_scored=bool(job.scored),
             criteria_snapshot=snapshot,
             session_id=session_id,
             decided_at=datetime.now(timezone.utc),
@@ -147,6 +173,8 @@ def record_decision():
     return jsonify({
         "recorded": True,
         "decision_id": decision_id,
+        "rating": rating,
+        "label": RATINGS[rating],
         "session_count": session_count,
         "total_decisions": total,
         "floor": config.DECISION_FLOOR,
@@ -162,7 +190,26 @@ def do_recalibrate():
     return jsonify(result), (409 if result["status"] == "refused" else 200)
 
 
+@bp.get("/correction")
+def correction():
+    """What JobScout's agents read.
+
+    Positive means JobScout under-weights that dimension; negative means it
+    over-weights it. A dimension with too little evidence is absent, not zero.
+    """
+    current = load_correction()
+    with get_db() as db:
+        n = db.scalar(select(func.count(Decision.id))) or 0
+    return jsonify({
+        "correction": current,
+        "dimensions": list(ALL_DIMENSIONS),
+        "decisions": n,
+        "floor": config.DECISION_FLOOR,
+        "calibrated": bool(current),
+    })
+
+
 @bp.get("/trends")
 def trends():
     runs = read_trends()
-    return jsonify({"runs": runs, "count": len(runs), "current": load_weights()})
+    return jsonify({"runs": runs, "count": len(runs), "current": load_correction()})

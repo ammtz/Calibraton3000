@@ -1,37 +1,33 @@
-"""Every test runs against a throwaway SQLite file, weights file and log dir."""
+"""Every test runs against a throwaway SQLite file, correction file and log dir."""
 from __future__ import annotations
 
 import pytest
 
 from app import config, create_app
+from app.calibration import save_correction
 from app.db import get_db
 from app.models import Decision, Job
-from app.scoring import save_weights
 
-SEED_WEIGHTS = {
-    "comp.base": 0.0,
-    "culture_fit": 1.0,
-    "remote": 1.0,
-    "seniority_fit": 1.0,
-}
+# JobScout ranks these cards without regard to `trajectory`; the fake rater
+# cares about it a lot. A working correction must discover that gap.
+PLANTED_BIAS = "trajectory"
 
 
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
-    """Redirect config paths at the filesystem tmp_path. Returns the paths."""
-    weights = tmp_path / "config" / "weights.json"
+    correction = tmp_path / "config" / "correction.json"
     logs = tmp_path / "logs"
-    weights.parent.mkdir(parents=True, exist_ok=True)
+    correction.parent.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(config, "CONFIG_DIR", weights.parent)
+    monkeypatch.setattr(config, "CONFIG_DIR", correction.parent)
     monkeypatch.setattr(config, "LOGS_DIR", logs)
-    monkeypatch.setattr(config, "WEIGHTS_PATH", weights)
+    monkeypatch.setattr(config, "CORRECTION_PATH", correction)
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "data" / "calibraton.db")
 
-    save_weights(SEED_WEIGHTS, weights)
-    return {"db": tmp_path / "data" / "calibraton.db", "weights": weights, "logs": logs}
+    save_correction({}, correction)
+    return {"db": tmp_path / "data" / "calibraton.db", "correction": correction, "logs": logs}
 
 
 @pytest.fixture
@@ -42,30 +38,92 @@ def client(sandbox):
         yield c
 
 
-def fake_jobs(count, *, offset=0, good=True):
-    """Deterministic JobScout-shaped payloads. `good` jobs score higher."""
-    jobs = []
-    for i in range(offset, offset + count):
-        jobs.append({
-            "source_id": f"js-{i:04d}",
-            "title": f"{'Staff' if good else 'Junior'} Engineer {i}",
-            "company": f"Company {i}",
-            "blurb": "Why this fits: builds tools, ships fast." if good else "Mostly maintenance work.",
-            "criteria": {
-                "seniority_fit": 0.9 if good else 0.2,
-                "remote": good,
-                "culture_fit": 0.8 if good else 0.3,
-                "comp": {"base": 190000 if good else 95000},
-                "tags": ["python", "flask"],
-            },
-        })
-    return jobs
+def scored_cards(count, *, offset=0, thin_dimension_after=5):
+    """Deterministic ranked cards. `trajectory` varies independently of rank.
 
+    `pool_thinness` is present on only the first few cards, so MIN_SUPPORT has
+    something to drop.
+    """
+    cards = []
+    for i in range(count):
+        rank = i + 1
+        base = 1.0 - (i / (count - 1)) if count > 1 else 0.5  # 1.0 best -> 0.0 worst
+        trajectory = 0.9 if i % 2 == 0 else 0.1  # independent of rank, on purpose
 
-def counts(db_path):
-    """Row counts read through a fresh session on the given database."""
-    with get_db() as db:
-        return {
-            "jobs": db.query(Job).count(),
-            "decisions": db.query(Decision).count(),
+        points = {
+            "pay": round(base, 3),
+            "security": round(base * 0.8, 3),
+            "trajectory": trajectory,
+            "location": 0.5,
+            "industry": round(base * 0.6, 3),
+            "company_size": round(1 - base, 3),
+            "public_signals": round(base * 0.4, 3),
+            "pillar_overlap": round(base, 3),
+            "tn_sponsorship": 1.0 if i % 3 else 0.0,
+            "seniority_match": round(base * 0.9, 3),
+            "domain_overlap": round(base * 0.7, 3),
+            "posting_freshness": round(1 - base, 3),
         }
+        if i < thin_dimension_after:
+            points["pool_thinness"] = 0.5
+
+        cards.append({
+            "card_id": f"job_{offset + i:04d}",
+            "title": f"Engineer {offset + i}",
+            "company": f"Company {offset + i}",
+            "blurb": "Why this fits: ships tools, owns the stack.",
+            "scored": True,
+            "score": round(base, 4),
+            "rank": rank,
+            "rank_total": count,
+            "points": points,
+            "known": len(points),
+            "known_total": 13,
+            "excluded": False,
+        })
+    return cards
+
+
+def unscored_cards(count, *, offset=900):
+    """Cards JobScout declined to score — one whole half unknown."""
+    return [{
+        "card_id": f"job_{offset + i:04d}",
+        "title": f"Mystery Role {offset + i}",
+        "company": f"Opaque Co {offset + i}",
+        "blurb": "Why this fits: unclear, nobody could establish P(hire).",
+        "scored": False,
+        "score": None,
+        "rank": None,
+        "rank_total": None,
+        "points": {"pay": 0.7, "security": 0.5, "trajectory": 0.6},
+        "known": 3,
+        "known_total": 13,
+        "excluded": False,
+    } for i in range(count)]
+
+
+def excluded_cards(count, *, offset=800):
+    """Hard-filtered by JobScout: ITAR, sub-floor band, junior title."""
+    return [{
+        "card_id": f"job_{offset + i:04d}",
+        "title": f"Junior Analyst {offset + i}",
+        "company": "Restricted Corp",
+        "excluded": True,
+        "exclusion_reason": "title outside USMCA professional categories",
+        "scored": False,
+        "points": {},
+    } for i in range(count)]
+
+
+def rate_from_rank(card):
+    """A rater who agrees with JobScout except that trajectory matters to them."""
+    total = card["rank_total"] or 2
+    percentile = 1.0 - (card["rank"] - 1) / max(total - 1, 1)
+    expected = 1.0 + 4.0 * percentile
+    nudge = 1.5 * (card["points"][PLANTED_BIAS] - 0.5)
+    return max(1, min(5, round(expected + nudge)))
+
+
+def counts(db_path=None):
+    with get_db() as db:
+        return {"jobs": db.query(Job).count(), "decisions": db.query(Decision).count()}
