@@ -34,6 +34,15 @@ dist/
 # Coverage
 .coverage
 htmlcov/
+.pytest_cache/
 
 # Docker
 *.pid
+
+# Calibraton3000 runtime
+data/
+
+# Exported card batches: real employers and personal positioning notes.
+# Publishing these is a deliberate act, never a side effect.
+*batch*.json
+rows*.json

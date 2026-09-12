@@ -1,105 +1,128 @@
-# JobFilteringApp
+# Calibraton3000
 
-A job capture and ranking tool. Capture job postings from LinkedIn (via Chrome extension), store them in a local database, and rank them against your resume using an LLM.
+**A ranker puts things in an order. You gut-check the order. Calibraton tells
+the ranker which dimensions it is weighting wrong.**
 
-**Stack:** Flask · SQLAlchemy · Alembic · PostgreSQL · OpenAI-compatible LLM
+One Flask app, one SQLite file, no build step. No scraper, no LLM, no network
+calls — and no score of its own. Something else already ranks; two rankers is
+one too many.
 
----
+## What it does
 
-## Quick Start
+1. **Ingest** a batch of ranked items — anything with an id, a rank, and a map
+   of dimension → number.
+2. **Swipe** one card at a time, showing *the source's* rank, score and
+   coverage. Rate 1–5: did it belong there?
+3. **Correct.** On session end it computes a per-dimension correction —
+   *"you under-value `trajectory` by 0.28 rating points per standard
+   deviation"* — and writes `config/correction.json`.
+4. The source reads that file and weights it however it likes.
 
-### 1. Start Postgres
+Nothing is ever written back to the source. The whole boundary is two files:
+[docs/ingest-contract.md](docs/ingest-contract.md).
 
-```bash
-docker-compose up -d
-```
-
-### 2. Install backend dependencies
-
-```bash
-cd backend
-pip install -r requirements.txt
-```
-
-### 3. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env — add OPENAI_API_KEY if you want LLM features
-```
-
-### 4. Run migrations
+## Run it
 
 ```bash
-# from inside backend/
-alembic upgrade head
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python run.py       # http://127.0.0.1:5000
 ```
 
-### 5. Start the server
+SQLite lands at `./data/calibraton.db`.
+
+Then load a batch and start rating:
 
 ```bash
-flask --app app.main run
-# or: python -m app.main
+.venv/bin/python tools/post_batch.py batch.json    # Windows: .venv\Scripts\python
 ```
 
-The server starts at **http://localhost:5000** and serves both the API and the frontend UI.
+Open <http://127.0.0.1:5000> and rate with the number keys. The correction
+refuses to move until 50 decisions are in.
 
----
+Ratings are also kept in an outbox so another process can carry them
+elsewhere. `GET /api/pending` lists what has not been delivered;
+`POST /api/synced` acknowledges it. The core service never delivers anything
+itself — it has no network. See `tools/sync_to_notion.py` for one that does.
 
-## Chrome Extension
+## Layout
 
-The `extension/` directory contains a Manifest V3 Chrome extension that captures LinkedIn job postings and sends them to your local server.
+```
+run.py                     entry point
+app/config.py              paths, DECISION_FLOOR, MIN_SUPPORT, DAMPING
+app/models.py              jobs, decisions — the whole data model
+app/criteria.py            dimension handling; unknown stays unknown
+app/calibration.py         the correction rule, drift log, trends
+app/api/routes.py          the endpoints
+frontend/                  vanilla JS, no framework
+config/correction.json     the deliverable, git-tracked
+logs/correction_*.json     drift history, one file per day
+docs/ingest-contract.md    what a source must send, and what it gets back
+docs/adapters/             worked examples
+```
 
-To load it:
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked** → select the `extension/` folder
+## Endpoints
 
-The extension is already configured to talk to `http://localhost:5000`.
+| Method | Path | Does |
+|---|---|---|
+| GET | `/` | Serve the swipe UI |
+| POST | `/api/jobs` | Ingest a batch (idempotent on the source's item id) |
+| GET | `/api/next` | Next unswiped item |
+| POST | `/api/decision` | Record one 1–5 rating |
+| POST | `/api/recalibrate` | Recompute the correction, write the log |
+| GET | `/api/correction` | **The deliverable.** Current correction vector |
+| GET | `/api/trends` | Drift history as JSON |
+| GET | `/api/pending` | Decisions not yet carried elsewhere |
+| POST | `/api/synced` | Acknowledge delivery, or record why it failed |
 
----
+## Design rules
 
-## API Endpoints
+**It knows nothing about your domain.** Dimension names are discovered from the
+payload. Rename one, add one, drop one — no code change here. There is no list
+of expected dimensions anywhere in `app/`.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/api/v1/ingest` | Capture a job posting |
-| GET | `/api/v1/jobs` | List all jobs |
-| GET | `/api/v1/jobs/<id>` | Get a single job |
-| PATCH | `/api/v1/jobs/<id>` | Update a job |
-| DELETE | `/api/v1/jobs/<id>` | Delete a job |
-| POST | `/api/v1/parse` | Parse job descriptions into structured fields |
-| POST | `/api/v1/analyze` | Analyze jobs with LLM (stub if no API key) |
-| POST | `/api/v1/resume` | Upload your resume text |
-| GET | `/api/v1/resume` | Get resume info |
-| POST | `/api/v1/cull` | Rank jobs against resume |
+**Unknown is absent, never zero** — end to end. A dimension the source could not
+establish is dropped from the item, from the math, and from the output rather
+than corrected to zero on no evidence. `null` is treated as absence; booleans
+are refused, because reading `false` as `0.0` is the same lie.
 
----
+**It never ranks.** The card shows the source's numbers. Calibraton computes one
+thing and it is not a score.
 
-## Tests
+## The deck
+
+| Item | Reaches the deck? | Why |
+|---|---|---|
+| Ranked | Yes | The rating is a gut check on its placement |
+| Unranked | Yes, tagged | No placement to check, so the rating is an absolute call — stored and summarized apart, never folded into the correction |
+| Excluded by the source | No | Off the ranking already; there is no placement to check |
+
+## Ratings
+
+`1 No way · 2 Bad · 3 Meh · 4 Ok · 5 Great` — buttons, number keys 1–5, or
+arrows/swipe for the two extremes.
+
+**Meh counts toward the floor but trains nothing.** Clearing a card is a real
+decision; indifference is not a vote.
+
+## The correction rule
+
+Covariance of your rank-residual with each dimension, damped 50% against the
+previous run. Refuses to move under **50 decisions** — a guardrail, not a
+derived number. Rationale and open parameters:
+[docs/correction-rule.md](docs/correction-rule.md).
+
+## Smoke test
 
 ```bash
-cd backend
-pytest                     # unit tests only (no DB required)
-pytest tests/integration/  # requires Postgres DATABASE_URL in .env
+.venv/bin/python -m pytest -q
 ```
 
----
+Ingests items, drains the deck, asserts snapshots carry the rank they were
+judged against, asserts recalibrate refuses under the floor, seeds 60+
+decisions, asserts a log is written — and asserts the correction **finds a
+deliberately planted bias** while leaving thin and constant dimensions absent.
+Then restarts the app and asserts no state was lost.
 
-## LLM Configuration
+## Out of scope
 
-Works with any OpenAI-compatible API:
-
-```env
-# OpenAI
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini
-
-# Local (e.g. Ollama)
-OPENAI_BASE_URL=http://localhost:11434/v1
-OPENAI_MODEL=llama3
-# OPENAI_API_KEY can be empty for local servers
-```
-
-Without an API key the analyzer runs in stub mode (deterministic scores, no real LLM calls).
+Auth, deploy, Docker, multi-user, and anything that writes back to a source.
