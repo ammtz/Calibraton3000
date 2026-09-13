@@ -1,24 +1,27 @@
 # Calibraton3000
 
-**A ranker puts things in an order. You gut-check the order. Calibraton tells
-the ranker which dimensions it is weighting wrong.**
+Something else already ranks my stuff. This tells that ranker which dimensions it's
+weighting wrong.
 
-One Flask app, one SQLite file, no build step. No scraper, no LLM, no network
-calls — and no score of its own. Something else already ranks; two rankers is
-one too many.
+The loop: a ranker hands me a list, I swipe through it and say whether each item
+belonged where it was put, and Calibraton turns those gut calls into a correction
+vector the ranker can apply. It doesn't produce a score of its own — I didn't want
+two rankers arguing with each other.
+
+One Flask app, one SQLite file, no build step. No scraper, no LLM, no network calls.
 
 ## What it does
 
-1. **Ingest** a batch of ranked items — anything with an id, a rank, and a map
-   of dimension → number.
-2. **Swipe** one card at a time, showing *the source's* rank, score and
+1. **Ingest** a batch of ranked items — anything with an id, a rank, and a map of
+   dimension → number.
+2. **Swipe** one card at a time. The card shows the *source's* rank, score and
    coverage. Rate 1–5: did it belong there?
-3. **Correct.** On session end it computes a per-dimension correction —
-   *"you under-value `trajectory` by 0.28 rating points per standard
-   deviation"* — and writes `config/correction.json`.
-4. The source reads that file and weights it however it likes.
+3. **Correct.** At session end it computes a per-dimension correction — e.g.
+   "you under-value `trajectory` by 0.28 rating points per standard deviation" —
+   and writes `config/correction.json`.
+4. The source reads that file and does whatever it wants with it.
 
-Nothing is ever written back to the source. The whole boundary is two files:
+Nothing gets written back to the source. The entire boundary is two files, spec'd in
 [docs/ingest-contract.md](docs/ingest-contract.md).
 
 ## Run it
@@ -30,19 +33,19 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 SQLite lands at `./data/calibraton.db`.
 
-Then load a batch and start rating:
+Load a batch:
 
 ```bash
 .venv/bin/python tools/post_batch.py batch.json    # Windows: .venv\Scripts\python
 ```
 
-Open <http://127.0.0.1:5000> and rate with the number keys. The correction
-refuses to move until 50 decisions are in.
+Then open <http://127.0.0.1:5000> and rate with the number keys. The correction won't
+move until 50 decisions are in.
 
-Ratings are also kept in an outbox so another process can carry them
-elsewhere. `GET /api/pending` lists what has not been delivered;
-`POST /api/synced` acknowledges it. The core service never delivers anything
-itself — it has no network. See `tools/sync_to_notion.py` for one that does.
+Ratings also land in an outbox so another process can carry them somewhere else.
+`GET /api/pending` lists what hasn't been delivered, `POST /api/synced` acknowledges
+it. The service never delivers anything itself — it has no network access. See
+`tools/sync_to_notion.py` for one that does.
 
 ## Layout
 
@@ -50,78 +53,78 @@ itself — it has no network. See `tools/sync_to_notion.py` for one that does.
 run.py                     entry point
 app/config.py              paths, DECISION_FLOOR, MIN_SUPPORT, DAMPING
 app/models.py              jobs, decisions — the whole data model
-app/criteria.py            dimension handling; unknown stays unknown
+app/criteria.py            dimension handling
 app/calibration.py         the correction rule, drift log, trends
 app/api/routes.py          the endpoints
 frontend/                  vanilla JS, no framework
-config/correction.json     the deliverable, git-tracked
+config/correction.json     the output, git-tracked
 logs/correction_*.json     drift history, one file per day
-docs/ingest-contract.md    what a source must send, and what it gets back
+docs/ingest-contract.md    what a source sends, and what it gets back
 docs/adapters/             worked examples
 ```
 
 ## Endpoints
 
-| Method | Path | Does |
-|---|---|---|
-| GET | `/` | Serve the swipe UI |
-| POST | `/api/jobs` | Ingest a batch (idempotent on the source's item id) |
-| GET | `/api/next` | Next unswiped item |
-| POST | `/api/decision` | Record one 1–5 rating |
-| POST | `/api/recalibrate` | Recompute the correction, write the log |
-| GET | `/api/correction` | **The deliverable.** Current correction vector |
-| GET | `/api/trends` | Drift history as JSON |
-| GET | `/api/pending` | Decisions not yet carried elsewhere |
-| POST | `/api/synced` | Acknowledge delivery, or record why it failed |
+| Method | Path               | Does                                                |
+| ------ | ------------------ | --------------------------------------------------- |
+| GET    | `/`                | Serve the swipe UI                                  |
+| POST   | `/api/jobs`        | Ingest a batch (idempotent on the source's item id) |
+| GET    | `/api/next`        | Next unswiped item                                  |
+| POST   | `/api/decision`    | Record one 1–5 rating                               |
+| POST   | `/api/recalibrate` | Recompute the correction, write the log             |
+| GET    | `/api/correction`  | Current correction vector — this is the output      |
+| GET    | `/api/trends`      | Drift history as JSON                               |
+| GET    | `/api/pending`     | Decisions not yet carried elsewhere                 |
+| POST   | `/api/synced`      | Acknowledge delivery, or record why it failed       |
 
-## Design rules
+## Three rules I held to
 
-**It knows nothing about your domain.** Dimension names are discovered from the
-payload. Rename one, add one, drop one — no code change here. There is no list
-of expected dimensions anywhere in `app/`.
+**It knows nothing about the domain.** Dimension names come from the payload. Rename
+one, add one, drop one — nothing in `app/` needs to change. There's no hardcoded list
+of expected dimensions anywhere.
 
-**Unknown is absent, never zero** — end to end. A dimension the source could not
-establish is dropped from the item, from the math, and from the output rather
-than corrected to zero on no evidence. `null` is treated as absence; booleans
-are refused, because reading `false` as `0.0` is the same lie.
+**Missing means missing, not zero.** If the source couldn't establish a dimension, it
+gets dropped from the item, the math, and the output. `null` reads as absent. Booleans
+get rejected outright, because scoring `false` as `0.0` invents evidence that isn't
+there.
 
-**It never ranks.** The card shows the source's numbers. Calibraton computes one
-thing and it is not a score.
+**It never ranks.** Every number on the card belongs to the source. The one thing
+Calibraton computes is a correction, not a score.
 
-## The deck
+## What makes the deck
 
-| Item | Reaches the deck? | Why |
-|---|---|---|
-| Ranked | Yes | The rating is a gut check on its placement |
-| Unranked | Yes, tagged | No placement to check, so the rating is an absolute call — stored and summarized apart, never folded into the correction |
-| Excluded by the source | No | Off the ranking already; there is no placement to check |
+| Item                   | In the deck? | Why                                                                                |
+| ---------------------- | ------------ | ---------------------------------------------------------------------------------- |
+| Ranked                 | Yes          | The rating is a check on its placement                                             |
+| Unranked               | Yes, tagged  | No placement to check, so the rating is an absolute call — stored and summarized separately, never folded into the correction |
+| Excluded by the source | No           | Already off the ranking, so there's no placement to check                          |
 
 ## Ratings
 
-`1 No way · 2 Bad · 3 Meh · 4 Ok · 5 Great` — buttons, number keys 1–5, or
-arrows/swipe for the two extremes.
+`1 No way · 2 Bad · 3 Meh · 4 Ok · 5 Great` — buttons, number keys 1–5, or arrows and
+swipe for the two extremes.
 
-**Meh counts toward the floor but trains nothing.** Clearing a card is a real
-decision; indifference is not a vote.
+**Meh counts toward the floor but trains nothing.** Clearing a card is still a
+decision worth logging, but it isn't signal about any dimension.
 
 ## The correction rule
 
-Covariance of your rank-residual with each dimension, damped 50% against the
-previous run. Refuses to move under **50 decisions** — a guardrail, not a
-derived number. Rationale and open parameters:
+Covariance of your rank-residual with each dimension, damped 50% against the previous
+run. It refuses to move under **50 decisions** — that's a guardrail I picked, not a
+number I derived. Reasoning and the open parameters are in
 [docs/correction-rule.md](docs/correction-rule.md).
 
-## Smoke test
+## Tests
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
-Ingests items, drains the deck, asserts snapshots carry the rank they were
-judged against, asserts recalibrate refuses under the floor, seeds 60+
-decisions, asserts a log is written — and asserts the correction **finds a
-deliberately planted bias** while leaving thin and constant dimensions absent.
-Then restarts the app and asserts no state was lost.
+The suite ingests items, drains the deck, and checks that snapshots carry the rank they
+were judged against, that recalibrate refuses under the floor, and that after 60+ seeded
+decisions a log gets written. It plants a deliberate bias and asserts the correction
+finds it, while leaving thin and constant dimensions out. Then it restarts the app and
+checks nothing was lost.
 
 ## Out of scope
 
